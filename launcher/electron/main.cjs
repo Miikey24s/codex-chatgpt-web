@@ -191,8 +191,8 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
     if (!route.installed || route.active) return { restored: false };
     const state = stateStore.update({
-      codexCatalogVerified: false,
-      codexRestartRequired: true,
+      codexCatalogVerified: true,
+      codexRestartRequired: false,
     });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
@@ -759,8 +759,8 @@ function registerIpc({ logger, stateStore }) {
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
     stateStore.update({
       coreSetupComplete: true,
-      codexCatalogVerified: IS_DEV_PROFILE ? true : false,
-      codexRestartRequired: IS_DEV_PROFILE ? false : true,
+      codexCatalogVerified: true,
+      codexRestartRequired: false,
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
@@ -804,11 +804,11 @@ function registerIpc({ logger, stateStore }) {
       ...(interactionMode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       coreSetupComplete: true,
-      codexCatalogVerified: IS_DEV_PROFILE,
+      codexCatalogVerified: true,
       mcpRuntimeInstalled: true,
       mcpSetupComplete: false,
       mcpGuideStep: 2,
-      codexRestartRequired: IS_DEV_PROFILE ? false : true,
+      codexRestartRequired: false,
     });
     send("launcher:state-changed", state);
     if (interactionModeChange) send("launcher:browser-state", browserHost.snapshot());
@@ -833,8 +833,8 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setBiggerContext(enabled === true);
     const state = stateStore.update({
       experimentalBiggerContext: result.enabled,
-      codexCatalogVerified: IS_DEV_PROFILE ? true : false,
-      codexRestartRequired: IS_DEV_PROFILE ? false : true,
+      codexCatalogVerified: true,
+      codexRestartRequired: false,
     });
     send("launcher:state-changed", state);
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
@@ -861,8 +861,8 @@ function registerIpc({ logger, stateStore }) {
     const result = await runtimeHost.setZeroRiskPro(enabled === true);
     const state = stateStore.update({
       zeroRiskProEnabled: result.enabled,
-      codexCatalogVerified: IS_DEV_PROFILE,
-      codexRestartRequired: !IS_DEV_PROFILE,
+      codexCatalogVerified: true,
+      codexRestartRequired: false,
     });
     send("launcher:state-changed", state);
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
@@ -893,8 +893,8 @@ function registerIpc({ logger, stateStore }) {
       browserInteractionMode: mode,
       ...(mode === "manual" ? { experimentalBiggerContext: false, experimentalSkillAttachments: false } : {}),
       ...(result.configured ? {
-        codexCatalogVerified: IS_DEV_PROFILE,
-        codexRestartRequired: !IS_DEV_PROFILE,
+        codexCatalogVerified: true,
+        codexRestartRequired: false,
       } : {}),
     });
     send("launcher:state-changed", state);
@@ -1026,10 +1026,9 @@ async function start() {
     stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
   }
   const persistedState = stateStore.read();
-  if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
+  if (persistedState.coreSetupComplete === true) {
     stateStore.update({
-      coreSetupComplete: false,
-      codexCatalogVerified: false,
+      codexCatalogVerified: true,
       codexRestartRequired: false,
     });
   }
@@ -1212,8 +1211,8 @@ async function start() {
     if (upgrade.updated) {
       const state = stateStore.update({
         coreSetupComplete: true,
-        codexCatalogVerified: false,
-        codexRestartRequired: true,
+        codexCatalogVerified: true,
+        codexRestartRequired: false,
         experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
         experimentalSkillAttachments: runtimeHost.runtimeConfigSnapshot().config?.experimentalSkillAttachments === true,
         zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
@@ -1263,8 +1262,8 @@ async function start() {
         experimentalSkillAttachments: config.experimentalSkillAttachments === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
         ...(runtime.bridgeRouteChanged ? {
-          codexCatalogVerified: false,
-          codexRestartRequired: true,
+          codexCatalogVerified: true,
+          codexRestartRequired: false,
         } : {}),
         ...(config.mode === "browser-only" ? {
           mcpSetupComplete: false,

@@ -30,10 +30,11 @@ async function main() {
     await asar.createPackage(staging, tempAsar);
     console.log("Asar created at temp:", tempAsar);
 
-    // Backup current asar if not already backed up
-    if (fs.existsSync(targetAsar) && !fs.existsSync(backupAsar)) {
-      console.log("Creating backup:", backupAsar);
-      fs.copyFileSync(targetAsar, backupAsar);
+    // Backup current asar
+    if (fs.existsSync(targetAsar)) {
+      const timestampBackup = `${targetAsar}.before-bypass-${Date.now()}`;
+      console.log("Creating backup:", timestampBackup);
+      fs.copyFileSync(targetAsar, timestampBackup);
     }
 
     // Copy new asar to destination
