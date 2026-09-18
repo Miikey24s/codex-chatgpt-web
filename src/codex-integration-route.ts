@@ -144,9 +144,6 @@ export function inferLegacyIntegrationOwner(text: string): IntegrationOwner {
 }
 
 function managedJournalIntegrationOwner(text: string, journal: ManagedRouteJournal): IntegrationOwner {
-  if (journal.version === 10 && journal.installed.gateway_route === true) {
-    return "cockpit";
-  }
   if (journal.version === 10 && journal.installed.integration_owner) {
     return journal.installed.integration_owner;
   }
@@ -154,9 +151,7 @@ function managedJournalIntegrationOwner(text: string, journal: ManagedRouteJourn
 }
 
 function cockpitGatewayRouteManaged(journal: ManagedRouteJournal): journal is CodexIntegrationJournal {
-  return journal.version === 10
-    && (journal.installed.integration_owner === undefined || journal.installed.integration_owner === "cockpit")
-    && journal.installed.gateway_route === true;
+  return false;
 }
 
 function restoreCockpitOwnedState(text: string, journal: ManagedRouteJournal): string {

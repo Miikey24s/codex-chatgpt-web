@@ -32,6 +32,7 @@ import type {
 } from "./codex-integration-shared";
 import { assertJournalTargetsConfig, readJournal } from "./codex-integration-journal";
 import {
+  assignments,
   findTopLevelAssignment,
   installCompatibilityV1Features,
   splitLines,
@@ -104,40 +105,40 @@ function installConfiguredIntegration(
   replaceExistingRoute: boolean,
   replaceExistingRealtimeRoute: boolean,
 ): ReturnType<typeof installConfiguredRoute> {
-  if (config.integrationOwner === "standalone") {
-    return installConfiguredRoute(
-      baseline,
-      installedUrl,
-      config,
-      replaceExistingRoute,
-      replaceExistingRealtimeRoute,
-    );
+  if (config.integrationOwner === "cockpit") {
+    const lines = splitLines(baseline);
+    const previous = assignments(lines);
+    const configured = config.subagentProtocol === "compatibility-v1"
+      ? (() => {
+          const features = installCompatibilityV1Features(baseline);
+          return {
+            text: features.text,
+            previous,
+            previousRealtimeWebrtcCallBaseUrl: findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url"),
+            previousMultiAgent: features.previousMultiAgent,
+            previousMultiAgentV2: features.previousMultiAgentV2,
+            previousAgentMaxDepth: features.previousAgentMaxDepth,
+            installedAgentMaxDepth: features.installedAgentMaxDepth,
+          };
+        })()
+      : {
+          text: baseline,
+          previous,
+          previousRealtimeWebrtcCallBaseUrl: findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url"),
+        };
+    const hook = "interruptHookCommand" in config
+      ? installCodexInterruptHookCommand(configured.text, getCodexConfigPath(), config.interruptHookCommand)
+      : installCodexInterruptHook(configured.text, getCodexConfigPath(), config);
+    return { ...configured, text: hook.text, interruptHook: hook.installed };
   }
 
-  const route = installRoute(
+  return installConfiguredRoute(
     baseline,
     installedUrl,
+    config,
     replaceExistingRoute,
     replaceExistingRealtimeRoute,
   );
-  const configured = config.subagentProtocol === "compatibility-v1"
-    ? (() => {
-        const features = installCompatibilityV1Features(route.text);
-        return {
-          text: features.text,
-          previous: route.previous,
-          previousRealtimeWebrtcCallBaseUrl: route.previousRealtimeWebrtcCallBaseUrl,
-          previousMultiAgent: features.previousMultiAgent,
-          previousMultiAgentV2: features.previousMultiAgentV2,
-          previousAgentMaxDepth: features.previousAgentMaxDepth,
-          installedAgentMaxDepth: features.installedAgentMaxDepth,
-        };
-      })()
-    : route;
-  const hook = "interruptHookCommand" in config
-    ? installCodexInterruptHookCommand(configured.text, getCodexConfigPath(), config.interruptHookCommand)
-    : installCodexInterruptHook(configured.text, getCodexConfigPath(), config);
-  return { ...configured, text: hook.text, interruptHook: hook.installed };
 }
 
 function journalIntegrationOwner(
@@ -339,7 +340,6 @@ export function installCodexIntegration(
         experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
         ...(config.integrationOwner === "cockpit" ? {
           integration_owner: "cockpit" as const,
-          gateway_route: true as const,
         } : {}),
         subagent_protocol: config.subagentProtocol,
         ...(config.subagentProtocol === "compatibility-v1" ? {
@@ -386,7 +386,6 @@ export function installCodexIntegration(
       experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
       ...(config.integrationOwner === "cockpit" ? {
         integration_owner: "cockpit" as const,
-        gateway_route: true as const,
       } : {}),
       subagent_protocol: config.subagentProtocol,
       ...(config.subagentProtocol === "compatibility-v1" ? {
@@ -451,9 +450,7 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     verifyInstalledRoute(current, existing);
     if (existsSync(getConfigPath())) {
       const config = loadConfig();
-      const needsCockpitGatewayUpgrade = config.integrationOwner === "cockpit"
-        && existing.installed.gateway_route !== true;
-      if (needsCockpitGatewayUpgrade || existing.interruptHook.command !== codexInterruptHookCommand(config)) {
+      if (existing.interruptHook.command !== codexInterruptHookCommand(config)) {
         installCodexIntegration(config);
         return { changed: true, active: true };
       }
@@ -497,7 +494,6 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
       experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
       ...(integrationOwner === "cockpit" ? {
         integration_owner: "cockpit" as const,
-        gateway_route: true as const,
       } : {}),
       subagent_protocol: protocol,
       ...(protocol === "compatibility-v1" ? {
