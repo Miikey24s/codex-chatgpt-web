@@ -62,11 +62,14 @@ export interface TunnelConfig {
   alias: string;
 }
 
+export type IntegrationOwner = "cockpit" | "standalone";
+
 export interface AppConfig {
   version: 3;
   purpose?: "dev-harness";
   releaseVersion: string;
   mode: RuntimeMode;
+  integrationOwner: IntegrationOwner;
   subagentProtocol: SubagentProtocol;
   host: "127.0.0.1";
   port: number;
@@ -192,12 +195,24 @@ export function preserveUtf8Bom(text: string, original: string): string {
   return original.startsWith("\uFEFF") ? `\uFEFF${stripUtf8Bom(text)}` : stripUtf8Bom(text);
 }
 
+function detectLegacyIntegrationOwner(): IntegrationOwner {
+  try {
+    const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+    const cockpitAuthFile = join(codexHome, ".cockpit_codex_auth.json");
+    const cockpitCatalogConfigFile = join(codexHome, ".cockpit-experimental-model-catalog-config.json");
+    return existsSync(cockpitAuthFile) || existsSync(cockpitCatalogConfigFile) ? "cockpit" : "standalone";
+  } catch {
+    return "standalone";
+  }
+}
+
 export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
   const home = getConfigDir();
   return {
     version: 3,
     releaseVersion: VERSION,
     mode,
+    integrationOwner: detectLegacyIntegrationOwner(),
     subagentProtocol: "compatibility-v1",
     host: "127.0.0.1",
     port: 17841,
@@ -376,6 +391,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
   if (parsed.mode !== "browser-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
+  const integrationOwner = parsed.integrationOwner ?? detectLegacyIntegrationOwner();
+  if (integrationOwner !== "cockpit" && integrationOwner !== "standalone") {
+    throw new Error(`Invalid integrationOwner in ${path}`);
+  }
   const subagentProtocol = parsed.subagentProtocol ?? "compatibility-v1";
   if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
     throw new Error(`Invalid subagentProtocol in ${path}`);
@@ -526,6 +545,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   return {
     ...parsed,
+    integrationOwner,
     appName: expectedAppName,
     automaticAppName,
     manualAppName,

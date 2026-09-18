@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import type { IntegrationOwner } from "./config";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   MANAGED_COMMENT,
@@ -134,6 +135,62 @@ function restoreOwnedManagedFeatures(text: string, journal: ManagedRouteJournal)
   }
   return restored;
 }
+
+export function inferLegacyIntegrationOwner(text: string): IntegrationOwner {
+  const current = assignments(splitLines(text));
+  return current.model_provider?.value === "codex_local_access" && !current.openai_base_url.present
+    ? "cockpit"
+    : "standalone";
+}
+
+function managedJournalIntegrationOwner(text: string, journal: ManagedRouteJournal): IntegrationOwner {
+  if (journal.version === 10 && journal.installed.gateway_route === true) {
+    return "cockpit";
+  }
+  if (journal.version === 10 && journal.installed.integration_owner) {
+    return journal.installed.integration_owner;
+  }
+  return inferLegacyIntegrationOwner(text);
+}
+
+function cockpitGatewayRouteManaged(journal: ManagedRouteJournal): journal is CodexIntegrationJournal {
+  return journal.version === 10
+    && (journal.installed.integration_owner === undefined || journal.installed.integration_owner === "cockpit")
+    && journal.installed.gateway_route === true;
+}
+
+function restoreCockpitOwnedState(text: string, journal: ManagedRouteJournal): string {
+  const withoutHook = journal.version === 10
+    ? restoreCodexInterruptHook(text, journal.interruptHook)
+    : text;
+  const restored = restoreOwnedManagedFeatures(withoutHook, journal);
+  const document = parseDocument(restored);
+  removeManagedComment(document);
+  if (cockpitGatewayRouteManaged(journal)) {
+    const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
+    if (currentBaseUrl.index === undefined) throw new Error("Managed Codex gateway route is missing");
+    const previousBaseUrl = journal.previous.openai_base_url;
+    if (previousBaseUrl.present) {
+      if (!previousBaseUrl.rawLine) throw new Error("Codex integration journal is missing the prior openai_base_url line");
+      document.lines[currentBaseUrl.index] = previousBaseUrl.rawLine;
+    } else {
+      removeDocumentLine(document, currentBaseUrl.index);
+    }
+
+    const currentRealtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
+    if (currentRealtime.index === undefined) throw new Error("Managed Codex realtime WebRTC call route is missing");
+    const previousRealtime = journal.previousRealtimeWebrtcCallBaseUrl;
+    if (previousRealtime.present) {
+      if (!previousRealtime.rawLine) {
+        throw new Error("Codex integration journal is missing the prior realtime WebRTC call route line");
+      }
+      document.lines[currentRealtime.index] = previousRealtime.rawLine;
+    } else {
+      removeDocumentLine(document, currentRealtime.index);
+    }
+  }
+  return renderDocument(document);
+}
 function restoreStillManagedRouteAssignments(text: string, journal: ManagedRouteJournal): string {
   const document = parseDocument(text);
   removeManagedComment(document);
@@ -177,6 +234,10 @@ export function replacementBaseline(
 ): string {
   if (!configExists) return "";
   if (!managedJournalIsActive(journal)) return currentText;
+
+  if (managedJournalIntegrationOwner(currentText, journal) === "cockpit") {
+    return restoreCockpitOwnedState(currentText, journal);
+  }
 
   if (journal.version === 9 || journal.version === 10) {
     const withoutHook = journal.version === 10
@@ -283,20 +344,22 @@ export function installRoute(
 export function verifyInstalledRoute(text: string, journal: ManagedRouteJournal): void {
   const lines = splitLines(text);
   const current = assignments(lines);
-  if (current.openai_base_url.value !== journal.installed.openai_base_url) {
+  const cockpitManaged = managedJournalIntegrationOwner(text, journal) === "cockpit";
+  const routeManaged = !cockpitManaged || cockpitGatewayRouteManaged(journal);
+  if (routeManaged && current.openai_base_url.value !== journal.installed.openai_base_url) {
     throw new Error("Codex openai_base_url changed after setup; refusing to overwrite the user's newer value");
   }
   const expectedMarker = journal.version === 9 || journal.version === 10
     ? MANAGED_ROUTE_COMMENT
     : MANAGED_COMMENT;
-  if (!lines.includes(expectedMarker)) {
+  if (routeManaged && !lines.includes(expectedMarker)) {
     throw new Error("Managed Codex route marker changed after setup; refusing to overwrite it");
   }
   if (journal.version === 9 || journal.version === 10) {
     const realtime = findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url");
     const expectedLine = `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(journal.installed.experimental_realtime_webrtc_call_base_url)}`;
-    if (realtime.value !== journal.installed.experimental_realtime_webrtc_call_base_url
-      || realtime.rawLine !== expectedLine) {
+    if (routeManaged && (realtime.value !== journal.installed.experimental_realtime_webrtc_call_base_url
+      || realtime.rawLine !== expectedLine)) {
       throw new Error("Codex realtime WebRTC call route changed after setup; refusing to overwrite the user's newer value");
     }
   }
@@ -311,7 +374,7 @@ export function verifyInstalledRoute(text: string, journal: ManagedRouteJournal)
       );
     }
   }
-  if (journal.version !== 7 && journal.version !== 8 && journal.version !== 9 && journal.version !== 10) {
+  if (!cockpitManaged && journal.version !== 7 && journal.version !== 8 && journal.version !== 9 && journal.version !== 10) {
     if (current.model_provider.present || current.model_catalog_json.present) {
       throw new Error("Codex model_provider or model_catalog_json changed after setup; refusing to overwrite the user's newer value");
     }
@@ -338,24 +401,26 @@ export function verifyRestoredRoute(
   const keys = journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10
     ? (["openai_base_url"] as const)
     : (["openai_base_url", "model_provider", "model_catalog_json"] as const);
+  const cockpitManaged = managedJournalIntegrationOwner(text, journal) === "cockpit";
+  const routeManaged = !cockpitManaged || cockpitGatewayRouteManaged(journal);
   for (const key of keys) {
-    if (!previousAssignmentMatches(current[key], journal.previous[key])) {
+    if (routeManaged && !previousAssignmentMatches(current[key], journal.previous[key])) {
       throw new Error(`Codex ${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`);
     }
   }
-  if (lines.includes(MANAGED_COMMENT) || lines.includes(MANAGED_ROUTE_COMMENT)) {
+  if (routeManaged && (lines.includes(MANAGED_COMMENT) || lines.includes(MANAGED_ROUTE_COMMENT))) {
     throw new Error("Managed Codex route marker is present while the bridge is disconnected");
   }
   if (journal.version === 9 || journal.version === 10) {
     const realtime = findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url");
-    if (!previousAssignmentMatchesExactly(realtime, journal.previousRealtimeWebrtcCallBaseUrl)) {
+    if (routeManaged && !previousAssignmentMatchesExactly(realtime, journal.previousRealtimeWebrtcCallBaseUrl)) {
       throw new Error(
         "Codex realtime WebRTC call route changed while the bridge was disconnected; refusing to overwrite the user's newer value",
       );
     }
   }
   if (journal.version === 10) verifyCodexInterruptHookRestored(text);
-  if (journal.version === 5 || journal.version === 6) {
+  if (!cockpitManaged && (journal.version === 5 || journal.version === 6)) {
     const previousFeatures: Array<readonly [string, PreviousFeatureAssignment]> = [
       ["remote_compaction_v2", journal.previousRemoteCompactionV2],
       ["multi_agent", journal.previousMultiAgent],
@@ -414,8 +479,9 @@ export function verifyRestoredRoute(
 export function assertPreservedPreviousAssignments(
   actual: CodexIntegrationJournal["previous"],
   expected: CodexIntegrationJournal["previous"],
+  integrationOwner: IntegrationOwner = "standalone",
 ): void {
-  if (!previousAssignmentMatches(actual.openai_base_url, expected.openai_base_url)) {
+  if (integrationOwner === "standalone" && !previousAssignmentMatches(actual.openai_base_url, expected.openai_base_url)) {
     throw new Error("Codex openai_base_url changed while the bridge was disconnected; refusing to replace it");
   }
 }
@@ -423,21 +489,27 @@ export function assertPreservedPreviousAssignments(
 export function assertPreservedPreviousRealtimeAssignment(
   actual: PreviousAssignment,
   expected: PreviousAssignment,
+  integrationOwner: IntegrationOwner = "standalone",
 ): void {
-  if (!previousAssignmentMatchesExactly(actual, expected)) {
+  if (integrationOwner === "standalone" && !previousAssignmentMatchesExactly(actual, expected)) {
     throw new Error("Codex realtime WebRTC call route changed while the bridge was disconnected; refusing to replace it");
   }
 }
 
 export function restoreManagedRoute(text: string, journal: ManagedRouteJournal): string {
   verifyInstalledRoute(text, journal);
+  if (managedJournalIntegrationOwner(text, journal) === "cockpit") {
+    return restoreCockpitOwnedState(text, journal);
+  }
   const withoutHook = journal.version === 10
     ? restoreCodexInterruptHook(text, journal.interruptHook)
     : text;
   const document = parseDocument(withoutHook);
   removeManagedComment(document);
   const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
-  if (currentBaseUrl.index === undefined) throw new Error("Managed Codex openai_base_url is missing");
+  if (currentBaseUrl.index === undefined) {
+    throw new Error("Managed Codex openai_base_url is missing");
+  }
   const previousBaseUrl = journal.previous.openai_base_url;
   if (previousBaseUrl.present) {
     if (!previousBaseUrl.rawLine) throw new Error("Codex integration journal is missing the prior openai_base_url line");
@@ -447,7 +519,9 @@ export function restoreManagedRoute(text: string, journal: ManagedRouteJournal):
   }
   if (journal.version === 9 || journal.version === 10) {
     const currentRealtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
-    if (currentRealtime.index === undefined) throw new Error("Managed Codex realtime WebRTC call route is missing");
+    if (currentRealtime.index === undefined) {
+      throw new Error("Managed Codex realtime WebRTC call route is missing");
+    }
     const previousRealtime = journal.previousRealtimeWebrtcCallBaseUrl;
     if (previousRealtime.present) {
       if (!previousRealtime.rawLine) {

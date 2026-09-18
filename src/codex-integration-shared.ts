@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { AppConfig, SubagentProtocol } from "./config";
+import type { AppConfig, IntegrationOwner, SubagentProtocol } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
 export const MANAGED_COMMENT = "# Managed by codex-chatgpt-web; `codex-chatgpt-web uninstall` restores prior values.";
@@ -57,6 +57,8 @@ export interface CodexIntegrationJournal {
   installed: {
     openai_base_url: string;
     experimental_realtime_webrtc_call_base_url: string;
+    integration_owner?: IntegrationOwner;
+    gateway_route?: true;
     subagent_protocol: SubagentProtocol;
     agent_max_depth?: number;
   };

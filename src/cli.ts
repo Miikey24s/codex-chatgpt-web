@@ -30,6 +30,7 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
+import { syncCockpitIntegration } from "./cockpit";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -41,6 +42,7 @@ Usage:
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
+  codex-chatgpt-web cockpit sync
   codex-chatgpt-web subagents <status|compatibility-v1|native>
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
@@ -419,6 +421,14 @@ async function subagentsCommand(args: string[]): Promise<void> {
     launcherRestartRequired: true,
   }, null, 2)}\n`);
 }
+ 
+async function cockpitCommand(args: string[]): Promise<void> {
+  const action = args.shift() ?? "sync";
+  assertNoArgs(args);
+  if (action !== "sync") throw new Error("Cockpit command must be: cockpit sync");
+  const port = existsSync(getConfigPath()) ? loadConfig().port : 17841;
+  stdout.write(`${JSON.stringify(syncCockpitIntegration(port), null, 2)}\n`);
+}
 
 async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
@@ -563,6 +573,7 @@ async function main(): Promise<void> {
   else if (command === "login") await loginCommand(args);
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
+  else if (command === "cockpit") await cockpitCommand(args);
   else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {
     const action = args.shift();

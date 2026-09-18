@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AppConfig } from "./config";
+import type { AppConfig, IntegrationOwner } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
-import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import { codexInterruptHookCommand, installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import { syncCockpitIntegration } from "./cockpit";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   getCodexConfigPath,
@@ -39,6 +40,7 @@ import {
 import {
   assertPreservedPreviousAssignments,
   assertPreservedPreviousRealtimeAssignment,
+  inferLegacyIntegrationOwner,
   installRoute,
   managedJournalIsActive,
   replacementBaseline,
@@ -91,6 +93,61 @@ function installConfiguredRoute(
     ? installCodexInterruptHookCommand(configured.text, getCodexConfigPath(), config.interruptHookCommand)
     : installCodexInterruptHook(configured.text, getCodexConfigPath(), config);
   return { ...configured, text: hook.text, interruptHook: hook.installed };
+}
+
+function installConfiguredIntegration(
+  baseline: string,
+  installedUrl: string,
+  config: Pick<AppConfig, "integrationOwner" | "subagentProtocol"> & (
+    Pick<AppConfig, "runtimeCommand"> | { interruptHookCommand: string }
+  ),
+  replaceExistingRoute: boolean,
+  replaceExistingRealtimeRoute: boolean,
+): ReturnType<typeof installConfiguredRoute> {
+  if (config.integrationOwner === "standalone") {
+    return installConfiguredRoute(
+      baseline,
+      installedUrl,
+      config,
+      replaceExistingRoute,
+      replaceExistingRealtimeRoute,
+    );
+  }
+
+  const route = installRoute(
+    baseline,
+    installedUrl,
+    replaceExistingRoute,
+    replaceExistingRealtimeRoute,
+  );
+  const configured = config.subagentProtocol === "compatibility-v1"
+    ? (() => {
+        const features = installCompatibilityV1Features(route.text);
+        return {
+          text: features.text,
+          previous: route.previous,
+          previousRealtimeWebrtcCallBaseUrl: route.previousRealtimeWebrtcCallBaseUrl,
+          previousMultiAgent: features.previousMultiAgent,
+          previousMultiAgentV2: features.previousMultiAgentV2,
+          previousAgentMaxDepth: features.previousAgentMaxDepth,
+          installedAgentMaxDepth: features.installedAgentMaxDepth,
+        };
+      })()
+    : route;
+  const hook = "interruptHookCommand" in config
+    ? installCodexInterruptHookCommand(configured.text, getCodexConfigPath(), config.interruptHookCommand)
+    : installCodexInterruptHook(configured.text, getCodexConfigPath(), config);
+  return { ...configured, text: hook.text, interruptHook: hook.installed };
+}
+
+function journalIntegrationOwner(
+  journal: Exclude<AnyCodexIntegrationJournal, { version: 2 }>,
+  restoredText: string,
+): IntegrationOwner {
+  if (journal.version === 10 && journal.installed.integration_owner) {
+    return journal.installed.integration_owner;
+  }
+  return inferLegacyIntegrationOwner(restoredText);
 }
 
 function journalProtocol(journal: Exclude<AnyCodexIntegrationJournal, { version: 2 }>): AppConfig["subagentProtocol"] {
@@ -182,14 +239,14 @@ export function preflightCodexIntegration(
       if (options.replaceExistingRoute !== true) {
         throw new Error(`Codex config is missing: ${configPath}`);
       }
-      installConfiguredRoute("", installedUrl, config, true, true);
+      installConfiguredIntegration("", installedUrl, config, true, true);
       return;
     }
     try {
       verifyManagedJournalState(currentText, existing);
     } catch (error) {
       if (options.replaceExistingRoute !== true) throw error;
-      installConfiguredRoute(
+      installConfiguredIntegration(
         replacementBaseline(currentText, configExists, existing),
         installedUrl,
         config,
@@ -202,7 +259,7 @@ export function preflightCodexIntegration(
     const baseline = managedJournalIsActive(existing)
       ? restoreManagedRoute(currentText, existing)
       : currentText;
-    installConfiguredRoute(
+    installConfiguredIntegration(
       baseline,
       installedUrl,
       config,
@@ -218,7 +275,7 @@ export function preflightCodexIntegration(
     }
     baseline = restoreLegacyV2(currentText, existing);
   }
-  installConfiguredRoute(
+  installConfiguredIntegration(
     baseline,
     installedUrl,
     config,
@@ -256,7 +313,7 @@ export function installCodexIntegration(
       baseline = replacementBaseline(currentText, configExists, existing);
       preservePrevious = false;
     }
-    const patched = installConfiguredRoute(
+    const patched = installConfiguredIntegration(
       baseline,
       installedUrl,
       config,
@@ -264,11 +321,12 @@ export function installCodexIntegration(
       !preservePrevious || existing.version === 9 || existing.version === 10 || options.replaceExistingRoute === true,
     );
     if (preservePrevious) {
-      assertPreservedPreviousAssignments(patched.previous, existing.previous);
+      assertPreservedPreviousAssignments(patched.previous, existing.previous, config.integrationOwner);
       if (existing.version === 9 || existing.version === 10) {
         assertPreservedPreviousRealtimeAssignment(
           patched.previousRealtimeWebrtcCallBaseUrl,
           existing.previousRealtimeWebrtcCallBaseUrl,
+          config.integrationOwner,
         );
       }
     }
@@ -279,6 +337,10 @@ export function installCodexIntegration(
       installed: {
         openai_base_url: installedUrl,
         experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
+        ...(config.integrationOwner === "cockpit" ? {
+          integration_owner: "cockpit" as const,
+          gateway_route: true as const,
+        } : {}),
         subagent_protocol: config.subagentProtocol,
         ...(config.subagentProtocol === "compatibility-v1" ? {
           agent_max_depth: patched.installedAgentMaxDepth,
@@ -297,6 +359,7 @@ export function installCodexIntegration(
       ...(existing.format ? { format: existing.format } : {}),
     };
     writeIntegrationState(updated, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
+    if (config.integrationOwner === "cockpit") syncCockpitIntegration(config.port);
     return updated;
   }
 
@@ -307,7 +370,7 @@ export function installCodexIntegration(
     }
     baseline = restoreLegacyV2(currentText, existing);
   }
-  const patched = installConfiguredRoute(
+  const patched = installConfiguredIntegration(
     baseline,
     installedUrl,
     config,
@@ -321,6 +384,10 @@ export function installCodexIntegration(
     installed: {
       openai_base_url: installedUrl,
       experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
+      ...(config.integrationOwner === "cockpit" ? {
+        integration_owner: "cockpit" as const,
+        gateway_route: true as const,
+      } : {}),
       subagent_protocol: config.subagentProtocol,
       ...(config.subagentProtocol === "compatibility-v1" ? {
         agent_max_depth: patched.installedAgentMaxDepth,
@@ -337,6 +404,7 @@ export function installCodexIntegration(
     format: textFormat(baseline),
   };
   writeIntegrationState(journal, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
+  if (config.integrationOwner === "cockpit") syncCockpitIntegration(config.port);
   if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
   return journal;
 }
@@ -381,6 +449,15 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const current = readFileSync(existing.configPath, "utf8");
   if (existing.version === 10 && existing.active) {
     verifyInstalledRoute(current, existing);
+    if (existsSync(getConfigPath())) {
+      const config = loadConfig();
+      const needsCockpitGatewayUpgrade = config.integrationOwner === "cockpit"
+        && existing.installed.gateway_route !== true;
+      if (needsCockpitGatewayUpgrade || existing.interruptHook.command !== codexInterruptHookCommand(config)) {
+        installCodexIntegration(config);
+        return { changed: true, active: true };
+      }
+    }
     return { changed: false, active: true };
   }
   let baseline: string;
@@ -392,21 +469,23 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     baseline = restoreManagedRoute(current, existing);
   }
   const protocol = journalProtocol(existing);
+  const integrationOwner = journalIntegrationOwner(existing, baseline);
   const hookConfig = existing.version === 10
     ? { interruptHookCommand: existing.interruptHook.command }
     : { runtimeCommand: loadConfig().runtimeCommand };
-  const route = installConfiguredRoute(
+  const route = installConfiguredIntegration(
     baseline,
     existing.installed.openai_base_url,
-    { subagentProtocol: protocol, ...hookConfig },
+    { integrationOwner, subagentProtocol: protocol, ...hookConfig },
     true,
     existing.version === 9 || existing.version === 10,
   );
-  assertPreservedPreviousAssignments(route.previous, existing.previous);
+  assertPreservedPreviousAssignments(route.previous, existing.previous, integrationOwner);
   if (existing.version === 9 || existing.version === 10) {
     assertPreservedPreviousRealtimeAssignment(
       route.previousRealtimeWebrtcCallBaseUrl,
       existing.previousRealtimeWebrtcCallBaseUrl,
+      integrationOwner,
     );
   }
   const connected: CodexIntegrationJournal = {
@@ -416,6 +495,10 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     installed: {
       openai_base_url: existing.installed.openai_base_url,
       experimental_realtime_webrtc_call_base_url: CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
+      ...(integrationOwner === "cockpit" ? {
+        integration_owner: "cockpit" as const,
+        gateway_route: true as const,
+      } : {}),
       subagent_protocol: protocol,
       ...(protocol === "compatibility-v1" ? {
         agent_max_depth: route.installedAgentMaxDepth,
