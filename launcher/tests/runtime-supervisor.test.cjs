@@ -1707,6 +1707,52 @@ test("launcher clears an empty stale ownership marker when Windows reuses its PI
   }
 });
 
+test("launcher clears a stale daemon marker when its PID is reused by an unrelated process", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-reused-daemon-pid-"));
+  const dummy = process.platform === "win32"
+    ? spawn("ping.exe", ["127.0.0.1", "-n", "60"], { stdio: "ignore" })
+    : spawn("sleep", ["60"], { stdio: "ignore" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
+  fs.writeFileSync(supervisor.statePath, `${JSON.stringify({
+    version: 1,
+    ownerPid: 999998,
+    daemonPid: dummy.pid,
+    tunnelPid: null,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  })}\n`);
+  supervisor.proxyHealthPayload = async () => null;
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    ready: false,
+    pid: null,
+    state: "stopped",
+    processRunning: false,
+    absent: true,
+    statusKnown: true,
+  });
+  try {
+    assert.equal(await supervisor.stopStaleOwnedRuntime({
+      mode: "full",
+      port: 17841,
+      releaseVersion: "0.2.0",
+      tunnel: { alias: "codex-chatgpt-web" },
+    }), true);
+    assert.equal(fs.existsSync(supervisor.statePath), false);
+  } finally {
+    try {
+      dummy.kill("SIGKILL");
+    } catch {}
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed full-runtime marker with no child evidence cannot block removal on a stalled tunnel probe", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dead-runtime-removal-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");

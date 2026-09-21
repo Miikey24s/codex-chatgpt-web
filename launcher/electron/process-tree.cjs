@@ -51,8 +51,92 @@ function terminateOwnedProcessTree(child, signal = "SIGTERM") {
   }
 }
 
+function processImageName(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return null;
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+    const tasklist = path.join(systemRoot, "System32", "tasklist.exe");
+    const result = spawnSync(tasklist, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 3_000,
+    });
+    if (result.status === 0 && typeof result.stdout === "string") {
+      const match = result.stdout.match(/^"([^"]+)"/m);
+      if (match) return match[1].toLowerCase();
+    }
+    return null;
+  }
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "comm="], {
+    encoding: "utf8",
+    timeout: 3_000,
+  });
+  if (result.status === 0 && typeof result.stdout === "string") {
+    const name = result.stdout.trim().toLowerCase();
+    return name || null;
+  }
+  return null;
+}
+
+const DAEMON_EXECUTABLE_NAMES = new Set([
+  "bun",
+  "bun.exe",
+  "node",
+  "node.exe",
+  "electron",
+  "electron.exe",
+]);
+
+const LAUNCHER_EXECUTABLE_NAMES = new Set([
+  "codex web gpt",
+  "codex web gpt.exe",
+  "codex-web-gpt",
+  "codex-web-gpt.exe",
+  "electron",
+  "electron.exe",
+  "node",
+  "node.exe",
+]);
+
+const TUNNEL_EXECUTABLE_NAMES = new Set([
+  "tunnel-client",
+  "tunnel-client.exe",
+  "node",
+  "node.exe",
+  "bun",
+  "bun.exe",
+]);
+
+function daemonProcessRunning(pid) {
+  if (!processRunning(pid)) return false;
+  const image = processImageName(pid);
+  if (!image) return true;
+  return DAEMON_EXECUTABLE_NAMES.has(image);
+}
+
+function launcherProcessRunning(pid) {
+  if (!processRunning(pid)) return false;
+  const image = processImageName(pid);
+  if (!image) return true;
+  return LAUNCHER_EXECUTABLE_NAMES.has(image);
+}
+
+function tunnelProcessRunning(pid) {
+  if (!processRunning(pid)) return false;
+  const image = processImageName(pid);
+  if (!image) return true;
+  return TUNNEL_EXECUTABLE_NAMES.has(image);
+}
+
 module.exports = {
+  DAEMON_EXECUTABLE_NAMES,
   DETACH_OWNED_CHILD,
+  LAUNCHER_EXECUTABLE_NAMES,
+  TUNNEL_EXECUTABLE_NAMES,
+  daemonProcessRunning,
+  launcherProcessRunning,
+  processImageName,
   processRunning,
   terminateOwnedProcessTree,
+  tunnelProcessRunning,
 };

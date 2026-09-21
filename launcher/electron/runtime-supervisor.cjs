@@ -7,8 +7,11 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
+  daemonProcessRunning,
+  launcherProcessRunning,
   processRunning,
   terminateOwnedProcessTree,
+  tunnelProcessRunning,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
 
@@ -109,7 +112,7 @@ function runtimeOwnershipPredatesCurrentBoot(state) {
 
 function runtimeOwnershipMayBeLive(state) {
   if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
-  if (processRunning(state.daemonPid) || processRunning(state.tunnelPid)) return true;
+  if (daemonProcessRunning(state.daemonPid) || tunnelProcessRunning(state.tunnelPid)) return true;
   return ["starting", "ready", "degraded", "stopping"].includes(state.status);
 }
 
@@ -464,9 +467,9 @@ class RuntimeSupervisor {
     }
     const state = this.readState();
     if (state && !runtimeOwnershipPredatesCurrentBoot(state) && (
-      processRunning(state.ownerPid)
-      || processRunning(state.daemonPid)
-      || processRunning(state.tunnelPid)
+      launcherProcessRunning(state.ownerPid)
+      || daemonProcessRunning(state.daemonPid)
+      || tunnelProcessRunning(state.tunnelPid)
     )) {
       throw new Error("Launcher ownership processes are still alive while an external installation is configured");
     }
@@ -476,9 +479,9 @@ class RuntimeSupervisor {
   writeExternalState(detail) {
     const existing = this.readState();
     const preservesLiveOwnership = existing && !runtimeOwnershipPredatesCurrentBoot(existing) && (
-      processRunning(existing.ownerPid)
-      || processRunning(existing.daemonPid)
-      || processRunning(existing.tunnelPid)
+      launcherProcessRunning(existing.ownerPid)
+      || daemonProcessRunning(existing.daemonPid)
+      || tunnelProcessRunning(existing.tunnelPid)
     );
     if (!preservesLiveOwnership) this.writeState("external", detail);
   }
@@ -1188,8 +1191,8 @@ class RuntimeSupervisor {
     if (!config) {
       const ownershipState = this.readState();
       if (ownershipState && !runtimeOwnershipPredatesCurrentBoot(ownershipState) && (
-        processRunning(ownershipState.daemonPid)
-        || processRunning(ownershipState.tunnelPid)
+        daemonProcessRunning(ownershipState.daemonPid)
+        || tunnelProcessRunning(ownershipState.tunnelPid)
       )) {
         const detail = "Runtime configuration is missing while launcher ownership processes are still alive";
         this.logger.warn("runtime.external_owner_detected", { detail });
@@ -1717,7 +1720,7 @@ class RuntimeSupervisor {
       return false;
     }
     const tunnelOnly = this.launcherProfile === "development";
-    if (tunnelOnly && processRunning(state.daemonPid)) {
+    if (tunnelOnly && daemonProcessRunning(state.daemonPid)) {
       throw new Error("DEV launcher ownership unexpectedly contains a Responses daemon");
     }
     const health = tunnelOnly ? null : await this.proxyHealthPayload(config);
@@ -1727,7 +1730,7 @@ class RuntimeSupervisor {
     if (daemonRunning && health.pid !== state.daemonPid) {
       throw new Error("The process on the Responses port does not match the stale launcher marker");
     }
-    if (!daemonRunning && processRunning(state.daemonPid)) {
+    if (!daemonRunning && daemonProcessRunning(state.daemonPid)) {
       throw new Error(
         `The stale daemon PID ${state.daemonPid} is still alive but did not provide matching health evidence`,
       );
@@ -1742,13 +1745,13 @@ class RuntimeSupervisor {
         && typeof tunnelHealth.state !== "string") {
         throw new Error(`The stale tunnel runtime state is ambiguous: ${tunnelHealth.detail}`);
       }
-      if (!managedTunnelRunning && processRunning(state.tunnelPid)) {
+      if (!managedTunnelRunning && tunnelProcessRunning(state.tunnelPid)) {
         throw new Error(
           `The stale tunnel PID ${state.tunnelPid} is still alive but the native runtime manager`
           + " does not recognize it; refusing to terminate an unverified process",
         );
       }
-    } else if (processRunning(state.tunnelPid)) {
+    } else if (tunnelProcessRunning(state.tunnelPid)) {
       throw new Error(
         `The stale tunnel PID ${state.tunnelPid} is still alive but browser-only configuration`
         + " has no tunnel identity with which to verify it",
@@ -1758,7 +1761,7 @@ class RuntimeSupervisor {
       this.clearState();
       return true;
     }
-    if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) {
+    if (state.ownerPid !== process.pid && launcherProcessRunning(state.ownerPid)) {
       throw new Error(`Another launcher process still owns the runtime (pid ${state.ownerPid})`);
     }
 
@@ -1965,8 +1968,8 @@ class RuntimeSupervisor {
       if (!this.daemon && !this.tunnel) {
         if (!config) {
           if (ownershipState && !runtimeOwnershipPredatesCurrentBoot(ownershipState) && (
-            processRunning(ownershipState.daemonPid)
-            || processRunning(ownershipState.tunnelPid)
+            daemonProcessRunning(ownershipState.daemonPid)
+            || tunnelProcessRunning(ownershipState.tunnelPid)
           )) {
             throw new Error("runtime configuration is missing while launcher ownership processes are still alive");
           }
