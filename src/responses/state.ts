@@ -17,12 +17,25 @@ const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
 interface StoredResponseState {
   createdAt: number;
   items: unknown[];
+  /** Trusted Codex thread owner captured when this response was produced. */
+  threadId?: string;
   /** Approximate in-memory size, computed locally at insert time (never trusted from disk). */
   sizeBytes?: number;
 }
 
 const states = new Map<string, StoredResponseState>();
+const latestResponseIdByThread = new Map<string, string>();
 let storedResponseBytes = 0;
+
+function refreshLatestThreadResponse(threadId: string): void {
+  latestResponseIdByThread.delete(threadId);
+  for (const [id, state] of [...states].reverse()) {
+    if (state.threadId === threadId) {
+      latestResponseIdByThread.set(threadId, id);
+      return;
+    }
+  }
+}
 
 /** The ONLY size computation: approximate entry weight from its items payload. */
 function measuredEntry(entry: Omit<StoredResponseState, "sizeBytes">): StoredResponseState {
@@ -41,6 +54,7 @@ function setEntry(id: string, entry: Omit<StoredResponseState, "sizeBytes">): vo
   const measured = measuredEntry(entry);
   storedResponseBytes += measured.sizeBytes ?? 0;
   states.set(id, measured);
+  if (measured.threadId) latestResponseIdByThread.set(measured.threadId, id);
 }
 
 /** The ONLY deletion point: TTL, count, byte, and explicit deletes all route here. */
@@ -50,12 +64,16 @@ function deleteEntry(id: string): void {
   storedResponseBytes -= existing.sizeBytes ?? 0;
   if (storedResponseBytes < 0) storedResponseBytes = 0;
   states.delete(id);
+  if (existing.threadId && latestResponseIdByThread.get(existing.threadId) === id) {
+    refreshLatestThreadResponse(existing.threadId);
+  }
 }
 // Expansion provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
 // newly appended input suffix without adding an unknown field that native passthrough could send
 // upstream. Consumers use the prefix length to bind trusted history and rolling checkpoints to the
 // exact replayed portion of this request.
 const replayedInputPrefixLengths = new WeakMap<object, number>();
+const replayedThreadOwners = new WeakMap<object, string>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPersistPath: string | null = null;
@@ -93,6 +111,7 @@ function ensureLoaded(): void {
       setEntry(id, {
         createdAt: rec.createdAt,
         items: rec.items,
+        ...(typeof rec.threadId === "string" && rec.threadId ? { threadId: rec.threadId } : {}),
       });
     }
     pruneResponses();
@@ -188,6 +207,52 @@ export function expandPreviousResponseInput(body: unknown): unknown {
     input: [...previous.items, ...inputItems(request.input)],
   };
   replayedInputPrefixLengths.set(expanded, previous.items.length);
+  if (previous.threadId) replayedThreadOwners.set(expanded, previous.threadId);
+  return expanded;
+}
+
+function itemIds(items: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const id = (item as Record<string, unknown>).id;
+    if (typeof id === "string" && id) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * Cockpit Local Access currently drops previous_response_id while preserving prompt_cache_key and
+ * native Codex turn metadata. In provider-only mode the server may therefore replay the newest
+ * response owned by that exact thread. The prompt-cache/thread equality is the routing fence, and
+ * any repeated item id means the caller already supplied history (retry/full replay), so we leave
+ * that request untouched instead of duplicating context.
+ */
+export function expandLatestThreadResponseInput(body: unknown, threadId: string): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body) || !threadId) return body;
+  const request = body as Record<string, unknown>;
+  if (request.previous_response_id !== undefined || request.prompt_cache_key !== threadId) return body;
+  ensureLoaded();
+  pruneResponses();
+  const previousId = latestResponseIdByThread.get(threadId);
+  if (!previousId) return body;
+  const previous = states.get(previousId);
+  if (!previous || previous.threadId !== threadId) return body;
+
+  const incoming = inputItems(request.input);
+  const previousIds = itemIds(previous.items);
+  if (incoming.some(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const id = (item as Record<string, unknown>).id;
+    return typeof id === "string" && previousIds.has(id);
+  })) return body;
+
+  const expanded = {
+    ...request,
+    input: [...previous.items, ...incoming],
+  };
+  replayedInputPrefixLengths.set(expanded, previous.items.length);
+  replayedThreadOwners.set(expanded, threadId);
   return expanded;
 }
 
@@ -197,6 +262,12 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
   return replayedInputPrefixLengths.get(body) ?? 0;
 }
 
+/** Trusted thread owner carried only through the proxy-private previous-response cache. */
+export function previousResponseReplayThreadId(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  return replayedThreadOwners.get(body);
+}
+
 /**
  * Cache completed output and max_output_tokens partial output for previous_response_id replay.
  * Content-filtered incomplete and failed output are not authoritative replay history.
@@ -204,7 +275,7 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
 export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; threadId?: string },
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
@@ -224,6 +295,7 @@ export function rememberResponseState(
   setEntry(response.id, {
     createdAt: now(),
     items: [...inputItems(request.input), ...response.output],
+    ...(opts?.threadId ? { threadId: opts.threadId } : {}),
   });
   pruneResponses();
   schedulePersist();

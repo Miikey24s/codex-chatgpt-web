@@ -22,7 +22,14 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import {
+  extractChatGptToolRegistryEnvironment,
+  extractChatGptTurnEnvironment,
+  extractChatGptTurnIdentity,
+  isChatGptToolRegistryEnvironment,
+  priorChatGptAbortedTurnIds,
+  type ChatGptBrokerEnvironment,
+} from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -324,12 +331,49 @@ function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSess
   return [...byId.values()];
 }
 
+function toolChoiceViolation(message: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 502,
+    errorType: "server_error",
+    code: "chatgpt_tool_choice_violation",
+    retryable: true,
+  });
+}
+
+function assertToolChoiceSatisfied(parsed: CodexParsedRequest, session: ChatGptTurnSession): void {
+  const choice = parsed.options.toolChoice;
+  const required = choice === "required"
+    || (typeof choice === "object" && choice !== null && (
+      "name" in choice || ("allowedTools" in choice && choice.mode === "required")
+    ));
+  if (required && !session.hasDeliveredToolResult()) {
+    throw toolChoiceViolation("ChatGPT returned a final answer without completing the tool call required by tool_choice");
+  }
+}
+
 function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequest[]): void {
   const available = new Set((parsed.context.tools ?? []).map(tool => namespacedToolName(tool.namespace, tool.name)));
   for (const request of requests) {
     if (!available.has(request.wireName)) {
       throw new Error(`ChatGPT requested a tool that the active Codex round did not advertise: ${request.wireName}`);
     }
+  }
+  const choice = parsed.options.toolChoice;
+  if (choice === "none" && requests.length > 0) {
+    throw toolChoiceViolation("ChatGPT called a Codex Native tool even though tool_choice is none");
+  }
+  if (typeof choice !== "object" || choice === null) return;
+  if ("name" in choice) {
+    const invalid = requests.find(request => request.wireName !== choice.name);
+    if (invalid) {
+      throw toolChoiceViolation(`ChatGPT called ${invalid.wireName} instead of the tool required by tool_choice: ${choice.name}`);
+    }
+    return;
+  }
+  const allowed = new Set(choice.allowedTools);
+  const invalid = requests.find(request => !allowed.has(request.wireName));
+  if (invalid) {
+    throw toolChoiceViolation(`ChatGPT called ${invalid.wireName}, which is outside the tool_choice allowed set`);
   }
 }
 
@@ -365,6 +409,7 @@ export function createChatGptWebAdapter(
     extraHighAvailable: provider.chatgptWeb?.extraHighAvailable === true,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
+  const providerOnly = provider.chatgptWeb?.providerOnly === true;
   const manualInteraction = provider.chatgptWeb?.browserInteractionMode === "manual";
   const executionNamespace = chatGptWebExecutionNamespace(provider);
   const retainedLauncherDescriptor = provider.chatgptWeb?.browserHost === "launcher"
@@ -397,7 +442,7 @@ export function createChatGptWebAdapter(
 
   const startRuntime = (
     parsed: CodexParsedRequest,
-    environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
+    environment: ChatGptBrokerEnvironment | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
     hooks: { onCompactionProgress?: () => void } = {},
@@ -514,6 +559,9 @@ export function createChatGptWebAdapter(
       : {};
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
+      if (isChatGptToolRegistryEnvironment(environment)) {
+        throw new Error("ChatGPT Zero Risk requires full trusted Codex environment authority");
+      }
       if (!retainedLauncherDescriptor) throw new Error("ChatGPT Zero Risk requires the Launcher browser host");
       const token = deferred<string>();
       const externalProgress = new ChatGptExternalTurnProgress();
@@ -846,16 +894,20 @@ export function createChatGptWebAdapter(
           });
           return;
         }
-        let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
+        let environment: ChatGptBrokerEnvironment | undefined;
         if (mode.localTools) {
-          try {
-            environment = environmentStore.resolve(parsed);
-          } catch (error) {
-            const identity = extractChatGptTurnIdentity(parsed);
-            console.warn(
-              `[chatgpt-web] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
-            );
-            throw error;
+          if (providerOnly && !manualRequest) {
+            environment = extractChatGptToolRegistryEnvironment(parsed);
+          } else {
+            try {
+              environment = environmentStore.resolve(parsed);
+            } catch (error) {
+              const identity = extractChatGptTurnIdentity(parsed);
+              console.warn(
+                `[chatgpt-web] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
+              );
+              throw error;
+            }
           }
         }
         if (parsed._compactionRequest) {
@@ -1168,6 +1220,7 @@ export function createChatGptWebAdapter(
             const settled = session.settledOutcome();
             if (settled) {
               if (settled.type === "error") throw settled.error;
+              assertToolChoiceSatisfied(parsed, session);
               const trace = session.runtime.trace.drain();
               const completedTextDeltas = session.runtime.text.drain();
               const finalReplay = replay.length === 0
@@ -1297,6 +1350,7 @@ export function createChatGptWebAdapter(
                 session.setFinalEvents(session.roundEvents(roundKey));
                 if (turnToken) await broker.revoke(turnToken);
                 if (completedOutcome.type === "error") throw completedOutcome.error;
+                assertToolChoiceSatisfied(parsed, session);
                 if (session.runtime.text.value() !== completedOutcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }

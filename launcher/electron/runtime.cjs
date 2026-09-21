@@ -838,6 +838,9 @@ class RuntimeHost {
   }
 
   async restoreBridgeRouteWithinOperation(operationName) {
+    if (this.runtimeConfigSnapshot().config?.integrationOwner === "cockpit") {
+      return { installed: false, active: false, changed: false, errors: [], skipped: true, reason: "cockpit-provider" };
+    }
     const current = await this.bridgeStatus(operationName);
     if (!current.installed || !current.active) return current;
     const disconnected = await this.run(operationName, ["route", "disconnect"], {
@@ -858,6 +861,9 @@ class RuntimeHost {
   }
 
   async restoreBridgeRoute(operationName = "bridge-route-restore") {
+    if (this.runtimeConfigSnapshot().config?.integrationOwner === "cockpit") {
+      return { installed: false, active: false, changed: false, errors: [], skipped: true, reason: "cockpit-provider" };
+    }
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = operationName;
     try {
@@ -869,6 +875,9 @@ class RuntimeHost {
 
   async connectBridgeRoute() {
     this.assertProductionProfile("Codex bridge routing");
+    if (this.runtimeConfigSnapshot().config?.integrationOwner === "cockpit") {
+      return { installed: false, active: false, changed: false, errors: [], skipped: true, reason: "cockpit-provider" };
+    }
     const name = "bridge-connect";
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = name;

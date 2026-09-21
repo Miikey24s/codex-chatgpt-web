@@ -543,12 +543,13 @@ test("mutating launcher operations are serialized before lifecycle changes begin
   assert.equal(fixture.invocation(), undefined);
 });
 
-function bridgeFixture({ active }) {
+function bridgeFixture({ active, integrationOwner = "standalone" }) {
   const calls = [];
   let routeActive = active;
+  const config = { mode: "browser-only", integrationOwner };
   const supervisor = {
-    readConfig: () => ({ mode: "browser-only" }),
-    readSetupConfig: () => ({ mode: "browser-only" }),
+    readConfig: () => config,
+    readSetupConfig: () => config,
     startIfConfigured: async () => {
       calls.push("runtime:start");
       return { status: "ready" };
@@ -596,6 +597,15 @@ test("launcher leaves an already connected route unchanged", async () => {
   const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
   assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("launcher never connects or restores a Codex route when Cockpit owns routing", async () => {
+  const fixture = bridgeFixture({ active: false, integrationOwner: "cockpit" });
+  const connected = await fixture.host.connectBridgeRoute();
+  const restored = await fixture.host.restoreBridgeRoute("runtime-start-fail-safe");
+  assert.equal(connected.skipped, true);
+  assert.equal(restored.skipped, true);
+  assert.deepEqual(fixture.calls, []);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {

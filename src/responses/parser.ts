@@ -14,7 +14,7 @@ import type {
 import { namespacedToolName } from "../types";
 import { responsesRequestSchema } from "./schema";
 import { compactionItemToText } from "./compaction";
-import { previousResponseReplayPrefixLength } from "./state";
+import { previousResponseReplayPrefixLength, previousResponseReplayThreadId } from "./state";
 import { decodeReasoningEnvelope } from "./reasoning-envelope";
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -278,6 +278,7 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
 
 export function parseRequest(body: unknown): CodexParsedRequest {
   const replayedInputPrefixLength = previousResponseReplayPrefixLength(body);
+  const replayedThreadId = previousResponseReplayThreadId(body);
   const parsed = responsesRequestSchema.safeParse(body);
   if (!parsed.success) {
     throw new Error(`responses parse error: ${parsed.error.message}`);
@@ -635,6 +636,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     options,
     _rawBody: body,
     ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
+    ...(replayedThreadId ? { _replayThreadId: replayedThreadId } : {}),
     ...(compactionRequest ? { _compactionRequest: true } : {}),
     ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
   };

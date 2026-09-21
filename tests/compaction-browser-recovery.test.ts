@@ -68,21 +68,20 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
         begin: async () => { throw new Error("fixture must stop before completion"); },
         commit: async () => { throw new Error("fixture must stop before completion"); },
       } : undefined,
-      prepare: async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: ['{"part":1}', '{"part":2}', '{"part":3}'], commit: "Summarize" } : undefined, release: () => { released = true; } }),
+      prepare: async () => ({ text: "Summarize the context", images: [], multipart: multipart ? { parts: Array.from({ length: 6 }, (_, index) => JSON.stringify({ part: index + 1 })), commit: "Summarize" } : undefined, release: () => { released = true; } }),
     }, owned ? "owned-surface" : undefined, page)).rejects.toBe(finalResponse);
     expect(recoveryCallbacks.map(callback => typeof callback)).toEqual(
-      Array(multipart ? 6 : 2).fill(owned ? "function" : "undefined"),
+      Array(multipart ? 12 : 2).fill(owned ? "function" : "undefined"),
     );
     expect(actions).toEqual([
       ...(multipart ? [
         "effort:low",
-        "attach:plain", "send", "observe", "ack",
-        "attach:plain", "send", "observe", "ack",
+        ...Array.from({ length: 5 }, () => ["attach:plain", "send", "observe", "ack"]).flat(),
       ] : []),
       "effort:high",
       tools ? "attach:tools" : "attach:plain", "files", "send", "observe",
     ]);
-    expect(sendBudgets).toEqual(multipart ? [180_000, 180_000, 180_000] : [20_000]);
+    expect(sendBudgets).toEqual(multipart ? Array(6).fill(180_000) : [20_000]);
     expect(released).toBe(true);
   } finally {
     rmSync(diagnostics, { recursive: true, force: true });

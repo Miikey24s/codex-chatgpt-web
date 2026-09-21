@@ -13,6 +13,7 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   });
   let upstream: Request | undefined;
   const config = defaultConfig("full");
+  config.integrationOwner = "standalone";
   config.subagentProtocol = "native";
   config.extraHighAvailable = true;
   config.proAvailable = true;
@@ -79,6 +80,7 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
 
 test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
   const config = defaultConfig("browser-only");
+  config.integrationOwner = "standalone";
   config.solAvailable = false;
   const response = await modelsRequest(
     new Request("http://127.0.0.1:17841/v1/models", {
@@ -103,6 +105,7 @@ test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
 
 test("Zero Risk returns one generic Web row without using scanned capabilities", async () => {
   const config = defaultConfig("full");
+  config.integrationOwner = "standalone";
   config.browserInteractionMode = "manual";
   config.solAvailable = true;
   config.extraHighAvailable = true;
@@ -150,6 +153,7 @@ test("Zero Risk returns one generic Web row without using scanned capabilities",
 
 test("ChatGPT-only native catalog rows do not turn model discovery into a 502", async () => {
   const config = defaultConfig("browser-only");
+  config.integrationOwner = "standalone";
   const response = await modelsRequest(
     new Request("http://127.0.0.1:17841/v1/models?client_version=0.147.0", {
       headers: { authorization: "Bearer chatgpt-session-token" },

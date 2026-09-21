@@ -7,6 +7,8 @@ export interface CodexParsedRequest {
   _rawBody?: unknown;
   /** Number of leading raw input items restored from local previous_response_id state. */
   _replayPrefixLen?: number;
+  /** Trusted Codex thread owner restored from proxy-private previous_response_id state. */
+  _replayThreadId?: string;
   /**
    * True when the input carried `{type:"compaction_trigger"}` — Codex remote compaction v2 asking
    * this turn to produce a `{type:"compaction"}` output item. Routed adapters can't natively;
@@ -297,6 +299,8 @@ export interface CodexProviderConfig {
     headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for every connector-capable Web model. */
     localToolsEnabled?: boolean;
+    /** Run behind an external router; local execution authority remains entirely in outer Codex. */
+    providerOnly?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */

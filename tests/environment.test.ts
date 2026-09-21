@@ -6,6 +6,7 @@ import { dirname, join, resolve, toNamespacedPath } from "node:path";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "../src/adapters/chatgpt-web/compaction-continuation";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
+import { parseRequest } from "../src/responses/parser";
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import type { CodexParsedRequest, CodexTool } from "../src/types";
 
@@ -17,6 +18,11 @@ afterEach(() => {
 });
 const environmentXml = `<environment_context>
   <cwd>${root}</cwd>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
+</environment_context>`;
+const cwdlessEnvironmentDeltaXml = `<environment_context>
+  <current_date>2026-09-20</current_date>
+  <timezone>Asia/Saigon</timezone>
   <filesystem><workspace_roots><root>${root}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
 </environment_context>`;
 
@@ -819,6 +825,408 @@ describe("trusted Codex task environment continuity", () => {
       cwd: root, roots: [root], writableRoots: [root], sandboxPolicy: { type: "dangerFullAccess" },
       tools: request.context.tools,
     });
+  });
+
+  test("CLI full-history cwd-less delta requires the exact current canonical rollout", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.workspaces = {};
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+
+    const currentInstruction = structuredClone(body.input[0]!);
+    currentInstruction.id = "msg_current_instruction";
+    delete currentInstruction.internal_chat_message_metadata_passthrough;
+    const oldTurnId = "01a06c66-0000-75c6-a0df-318f890ef6de";
+    const deltaPart = { type: "input_text", text: cwdlessEnvironmentDeltaXml };
+    body.input = [
+      {
+        type: "message", role: "user", id: "msg_historical_environment",
+        content: [{ type: "input_text", text: environmentXml }],
+        internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+      },
+      {
+        type: "message", role: "user", id: "msg_historical_instruction",
+        content: [{ type: "input_text", text: "Earlier instruction" }],
+        internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+      },
+      {
+        type: "message", role: "assistant", id: "msg_historical_answer", phase: "final_answer",
+        content: [{ type: "output_text", text: "Earlier instruction complete" }],
+        internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+      },
+      { type: "message", role: "user", id: "msg_current_environment", content: [deltaPart] },
+      currentInstruction,
+    ];
+    const parsed = parseRequest({ ...body, model: "chatgpt-web/high" });
+    const native = readFileSync(rolloutPath, "utf8");
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed).cwd).toBe(root);
+
+    rmSync(rolloutPath);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed))
+      .toThrow("missing cwd");
+
+    writeFileSync(rolloutPath, native);
+    deltaPart.text = cwdlessEnvironmentDeltaXml.replaceAll(root, resolve(root, "unproven-root"));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed))
+      .toThrow("conflicts with its canonical rollout");
+
+    deltaPart.text = cwdlessEnvironmentDeltaXml;
+    writeFileSync(rolloutPath, native.replaceAll(rolloutTurnId, rolloutParentId));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed))
+      .toThrow("current turn");
+  });
+
+  test("High auto-compaction authenticates a cwd-less current delta against its rollout", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    request.modelId = "chatgpt-web/high";
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const oldTurnId = "01a06c66-0000-75c6-a0df-318f890ef6de";
+    body.input[0]!.internal_chat_message_metadata_passthrough = { turn_id: oldTurnId };
+    const summary = "High automatic compaction checkpoint";
+    rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+      { turnId: oldTurnId, content: body.input[0]!.content },
+    ], summary);
+    const deltaPart = { type: "input_text", text: cwdlessEnvironmentDeltaXml };
+    body.input.unshift({
+      type: "message", role: "user", id: "msg_current_delta", content: [deltaPart],
+      internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+    });
+    body.input.push({ type: "compaction", encrypted_content: encodeCompactionSummary(summary) });
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(root);
+
+    deltaPart.text = cwdlessEnvironmentDeltaXml.replaceAll(root, resolve(root, "wrong-compaction-root"));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("conflicts with its canonical rollout");
+
+    deltaPart.text = cwdlessEnvironmentDeltaXml;
+    const native = readFileSync(rolloutPath, "utf8");
+    writeFileSync(rolloutPath, native.replaceAll(rolloutTurnId, rolloutParentId));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request))
+      .toThrow("current turn");
+  });
+
+  test("full-history 121-item transcript with native metadata identity recovers cwd exclusively from rollout", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [root]: {} },
+    });
+
+    const oldTurnId = "01a06c66-0000-75c6-a0df-318f890ef6de";
+    const inputItems: Array<Record<string, unknown>> = [];
+    inputItems.push({
+      type: "message", role: "user", id: "msg_initial_env",
+      content: [{ type: "input_text", text: environmentXml }],
+      internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+    });
+
+    for (let i = 1; i <= 118; i += 1) {
+      if (i % 3 === 1) {
+        inputItems.push({
+          type: "message", role: "user", id: `msg_hist_${i}`,
+          content: [{ type: "input_text", text: `Historical user instruction ${i}` }],
+          internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+        });
+      } else if (i % 3 === 2) {
+        inputItems.push({
+          type: "function_call", id: `call_hist_${i}`, call_id: `call_${i}`, name: "read_file",
+          arguments: JSON.stringify({ path: `${root}/file_${i}.txt` }),
+        });
+      } else {
+        inputItems.push({
+          type: "message", role: "assistant", id: `msg_hist_${i}`, phase: "final_answer",
+          content: [{ type: "output_text", text: `Assistant reply ${i}` }],
+          internal_chat_message_metadata_passthrough: { turn_id: oldTurnId },
+        });
+      }
+    }
+
+    inputItems.push({
+      type: "message", role: "user", id: "msg_current_delta_119",
+      content: [{ type: "input_text", text: cwdlessEnvironmentDeltaXml }],
+    });
+
+    inputItems.push({
+      type: "message", role: "user", id: "msg_current_instruction_120",
+      content: [{ type: "input_text", text: "Resume the task now." }],
+    });
+
+    expect(inputItems.length).toBe(121);
+    body.input = inputItems;
+    const parsed = parseRequest({ ...body, model: "chatgpt-web/high" });
+
+    const resolved = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed);
+    expect(resolved.cwd).toBe(root);
+    expect(resolved.sandboxPolicy.type).toBe("dangerFullAccess");
+  });
+
+  test("chatgpt-web/high auto-compaction with native metadata and unprovenanced delta recovers from rollout", () => {
+    const { codexHome, request } = resumedRootFixture();
+    request.modelId = "chatgpt-web/high";
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [root]: {} },
+    });
+
+    const oldTurnId = "01a06c66-0000-75c6-a0df-318f890ef6de";
+    body.input[0]!.internal_chat_message_metadata_passthrough = { turn_id: oldTurnId };
+    const summary = "High automatic compaction checkpoint summary";
+    rememberCompactionContinuation({ ...request, _compactionRequest: true }, extractChatGptTurnIdentity(request), [
+      { turnId: oldTurnId, content: body.input[0]!.content },
+    ], summary);
+
+    body.input = [
+      { type: "compaction", encrypted_content: encodeCompactionSummary(summary) },
+      {
+        type: "message", role: "user", id: "msg_current_delta",
+        content: [{ type: "input_text", text: cwdlessEnvironmentDeltaXml }],
+      },
+      {
+        type: "message", role: "user", id: "msg_current_instruction",
+        content: [{ type: "input_text", text: "Proceed with compaction continuation." }],
+      },
+    ];
+
+    const parsed = parseRequest({ ...body, model: "chatgpt-web/high" });
+    const resolved = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed);
+    expect(resolved.cwd).toBe(root);
+  });
+
+  test("rejects malformed current environment deltas fail-closed", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [root]: {} },
+    });
+
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+
+    const deltaWithEmptyCwd = cwdlessEnvironmentDeltaXml.replace("</environment_context>", "<cwd></cwd></environment_context>");
+    body.input = [
+      { type: "message", role: "user", id: "msg_delta", content: [{ type: "input_text", text: deltaWithEmptyCwd }] },
+      { type: "message", role: "user", id: "msg_inst", content: [{ type: "input_text", text: "Go" }] },
+    ];
+    expect(() => store.resolve(parseRequest({ ...body, model: "chatgpt-web/high" }))).toThrow("missing cwd");
+
+    const malformedXml = "<environment_context><workspace_roots>";
+    body.input[0] = { type: "message", role: "user", id: "msg_delta", content: [{ type: "input_text", text: malformedXml }] };
+    expect(() => store.resolve(parseRequest({ ...body, model: "chatgpt-web/high" }))).toThrow("missing cwd");
+
+    body.input[0] = { type: "message", role: "assistant", id: "msg_delta", content: [{ type: "input_text", text: cwdlessEnvironmentDeltaXml }] };
+    expect(() => store.resolve(parseRequest({ ...body, model: "chatgpt-web/high" }))).toThrow("missing cwd");
+
+    body.input[0] = { type: "message", role: "user", content: [{ type: "input_text", text: cwdlessEnvironmentDeltaXml }] };
+    expect(() => store.resolve(parseRequest({ ...body, model: "chatgpt-web/high" }))).toThrow("missing cwd");
+
+    const noProfileXml = `<environment_context><workspace_roots><root>${root}</root></workspace_roots></environment_context>`;
+    body.input[0] = { type: "message", role: "user", id: "msg_delta", content: [{ type: "input_text", text: noProfileXml }] };
+    expect(() => store.resolve(parseRequest({ ...body, model: "chatgpt-web/high" }))).toThrow("conflicts with its canonical rollout");
+  });
+
+  test("rejects missing rollout, wrong thread, wrong current turn, and permission/sandbox mismatch", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [root]: {} },
+    });
+
+    body.input = [
+      { type: "message", role: "user", id: "msg_delta", content: [{ type: "input_text", text: cwdlessEnvironmentDeltaXml }] },
+      { type: "message", role: "user", id: "msg_inst", content: [{ type: "input_text", text: "Go" }] },
+    ];
+    const native = readFileSync(rolloutPath, "utf8");
+
+    rmSync(rolloutPath);
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parseRequest({ ...body, model: "chatgpt-web/high" })))
+      .toThrow("missing cwd");
+
+    writeFileSync(rolloutPath, native);
+    const wrongThreadBody = structuredClone(body);
+    wrongThreadBody.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "01a06c66-9999-75c6-a0df-318f890ef6de",
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [root]: {} },
+    });
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parseRequest({ ...wrongThreadBody, model: "chatgpt-web/high" })))
+      .toThrow("missing cwd");
+
+    writeFileSync(rolloutPath, native.replaceAll(rolloutTurnId, "01a06c66-8888-75c6-a0df-318f890ef6de"));
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parseRequest({ ...body, model: "chatgpt-web/high" })))
+      .toThrow("current turn");
+
+    writeFileSync(rolloutPath, native);
+    const sandboxMismatchBody = structuredClone(body);
+    sandboxMismatchBody.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "read-only",
+      workspaces: { [root]: {} },
+    });
+    expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parseRequest({ ...sandboxMismatchBody, model: "chatgpt-web/high" })))
+      .toThrow("sandbox metadata conflicts");
+  });
+
+  test("proves resolved cwd comes exclusively from canonical rollout and never derives from workspace_roots[0]", () => {
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-subfolder-cwd-"));
+    temporaryRoots.push(codexHome);
+
+    const parentWorkspace = resolve(root, "parent-workspace");
+    const subfolderTaskCwd = resolve(root, "parent-workspace", "nested", "task-subfolder");
+
+    const rolloutPath = join(codexHome, "sessions", "2026", "09", "04",
+      `rollout-2026-09-04T15-30-36-${rolloutThreadId}.jsonl`);
+    mkdirSync(dirname(rolloutPath), { recursive: true });
+    writeFileSync(rolloutPath, [
+      JSON.stringify({ type: "session_meta", payload: { id: rolloutThreadId, source: "vscode" } }),
+      JSON.stringify({
+        type: "turn_context",
+        payload: {
+          turn_id: rolloutTurnId,
+          cwd: subfolderTaskCwd,
+          workspace_roots: [parentWorkspace, subfolderTaskCwd],
+          permission_profile: { type: "disabled" },
+          sandbox_policy: { type: "danger-full-access" },
+        },
+      }),
+    ].join("\n") + "\n");
+
+    const deltaWithParentFirst = `<environment_context><workspace_roots><root>${parentWorkspace}</root><root>${subfolderTaskCwd}</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted"/></permission_profile></environment_context>`;
+
+    const request = environmentlessChild();
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: rolloutThreadId,
+      turn_id: rolloutTurnId,
+      sandbox_mode: "danger-full-access",
+      workspaces: { [parentWorkspace]: {}, [subfolderTaskCwd]: {} },
+    });
+    body.input = [
+      { type: "message", role: "user", id: "msg_delta", content: [{ type: "input_text", text: deltaWithParentFirst }] },
+      { type: "message", role: "user", id: "msg_inst", content: [{ type: "input_text", text: "Prove canonical cwd" }] },
+    ];
+
+    const parsed = parseRequest({ ...body, model: "chatgpt-web/high" });
+    const resolved = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(parsed);
+
+    expect(resolved.cwd).toBe(subfolderTaskCwd);
+    expect(resolved.cwd).not.toBe(parentWorkspace);
+  });
+
+  function steeredRolloutFixture(child: boolean, workspaceRoots: string[]) {
+    const fixture = resumedRootFixture();
+    const { request, rolloutPath } = fixture;
+    const auxiliary = resolve(root, "..", "native-auxiliary-workspace");
+    const xml = environmentXml.replace(`<root>${root}</root>`, `<root>${root}</root><root>${auxiliary}</root>`);
+    const body = request._rawBody as { input: Array<Record<string, unknown>>; client_metadata: Record<string, string> };
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.workspaces = Object.fromEntries(workspaceRoots.map(path => [path, {}]));
+    if (child) Object.assign(metadata, {
+      parent_thread_id: rolloutParentId, agent_name: rolloutAgent, subagent_kind: "thread_spawn",
+    });
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const original = structuredClone(body.input[0]!);
+    original.id = "msg_original_instruction";
+    body.input[0]!.content = [{ type: "input_text", text: "Finish the bounded investigation now." }];
+    const environment = {
+      type: "message", role: "user", id: "msg_native_preamble",
+      internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+      content: [
+        { type: "input_text", text: "<recommended_plugins>example</recommended_plugins>" },
+        { type: "input_text", text: xml },
+      ],
+    };
+    body.input.unshift(environment, original, {
+      type: "message", role: "assistant", id: "msg_finished", phase: "final_answer",
+      content: [{ type: "output_text", text: "The first instruction is complete." }],
+      internal_chat_message_metadata_passthrough: { turn_id: rolloutTurnId },
+    });
+    const session = child ? childSessionMeta()
+      : { type: "session_meta", payload: { id: rolloutThreadId, source: "vscode" } };
+    writeFileSync(rolloutPath, [session, childTurnContext(rolloutTurnId, { workspace_roots: [root, auxiliary] })]
+      .map(value => JSON.stringify(value)).join("\n") + "\n");
+    return { ...fixture, request: parseRequest({ ...body, model: "chatgpt-web/pro" }), body, environment, auxiliary };
+  }
+
+  test("same-turn steering resolves V1 children without an assigned agent path", () => {
+    const { codexHome, request, body, rolloutPath, auxiliary } = steeredRolloutFixture(true, []);
+    const metadata = JSON.parse(body.client_metadata["x-codex-turn-metadata"]!);
+    metadata.agent_name = "/root";
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify(metadata);
+    const native = readFileSync(rolloutPath, "utf8").replaceAll(JSON.stringify(rolloutAgent), "null");
+    writeFileSync(rolloutPath, native);
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).roots)
+      .toEqual([root, auxiliary]);
+  });
+
+  for (const child of [false, true]) for (const gitRoots of [[], [root]]) {
+    test(`same-turn steering authenticates ${child ? "child" : "root"} auxiliary roots against the current rollout with ${gitRoots.length} Git roots`, () => {
+      const { codexHome, request, body, auxiliary } = steeredRolloutFixture(child, gitRoots);
+      const beforeSteering = { ...request, _rawBody: { ...body, input: body.input.slice(0, -1) } };
+      expect(extractChatGptTurnEnvironment(beforeSteering).roots).toEqual([root, auxiliary]);
+      expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
+      request.context.tools = [{ name: "current_only", description: "d", parameters: { type: "object" } }];
+      expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toEqual({
+        cwd: root, roots: [root, auxiliary], writableRoots: [root, auxiliary],
+        sandboxPolicy: { type: "dangerFullAccess" }, tools: request.context.tools,
+      });
+    });
+  }
+
+  test("steering never replaces missing or contradictory rollout proof with cached authority", () => {
+    const { codexHome, request, body, rolloutPath, environment, auxiliary } = steeredRolloutFixture(false, []);
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    store.resolve({ ...request, _rawBody: { ...body, input: body.input.slice(0, -1) } });
+    const native = readFileSync(rolloutPath, "utf8");
+    rmSync(rolloutPath);
+    expect(() => store.resolve(request)).toThrow("missing cwd");
+    writeFileSync(rolloutPath, native);
+    const original = environment.content[1]!.text;
+    for (const claim of [
+      original.replaceAll(auxiliary, resolve(root, "..", "unproven-root")),
+      original.replace(dangerFullAccessProfileXml, "<sandbox_mode>read-only</sandbox_mode>"),
+      original.replace(`<cwd>${root}</cwd>`, "<cwd/>"),
+    ]) {
+      environment.content[1]!.text = claim;
+      expect(() => store.resolve(request)).toThrow();
+    }
+    environment.content[1]!.text = original;
+    writeFileSync(rolloutPath, native.replaceAll(rolloutTurnId, rolloutParentId));
+    expect(() => store.resolve(request)).toThrow("current turn");
+  });
+
+  test("steering proof requires one attributed envelope and two current native instructions", () => {
+    const { codexHome, request, body, environment } = steeredRolloutFixture(false, []);
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    for (const index of [1, 3]) {
+      const item = body.input[index]!;
+      const metadata = item.internal_chat_message_metadata_passthrough;
+      item.internal_chat_message_metadata_passthrough = { turn_id: rolloutParentId };
+      expect(() => store.resolve(request)).toThrow();
+      item.internal_chat_message_metadata_passthrough = metadata;
+    }
+    body.input.push({ ...environment, id: "msg_new_invalid_update", content: [
+      { type: "input_text", text: "<environment_context><cwd/></environment_context>" },
+    ] });
+    expect(() => store.resolve(request)).toThrow();
+    body.input.pop();
+    body.input[0] = { ...environment, id: undefined };
+    expect(() => store.resolve(request)).toThrow();
   });
 
   test.skipIf(process.platform !== "win32")("resumed Windows tasks accept the same indexed rollout with either path namespace", () => {

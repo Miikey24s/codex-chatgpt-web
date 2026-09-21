@@ -7,11 +7,13 @@ import {
   CompactionTransactionStore,
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
-import type { ChatGptTurnEnvironment } from "./environment";
+import {
+  isChatGptToolRegistryEnvironment,
+  type ChatGptBrokerEnvironment,
+  type ChatGptTurnEnvironment,
+} from "./environment";
 
-interface PendingTurn extends ChatGptTurnEnvironment {
-  expiresAt?: number;
-}
+type PendingTurn = ChatGptBrokerEnvironment & { expiresAt?: number };
 
 export interface BrokerToolRequest {
   callId: string;
@@ -118,7 +120,7 @@ interface BrokerRequest {
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
-  environment?: ChatGptTurnEnvironment;
+  environment?: ChatGptBrokerEnvironment;
   ttlMs?: number;
   traceId?: string;
   callId?: string;
@@ -169,7 +171,13 @@ function retiredTurnLabel(traceId: string): string {
   return traceId && traceId !== "unknown" ? `Codex turn ${traceId}` : "a Codex turn";
 }
 
-function environmentIdentity(environment: ChatGptTurnEnvironment): string {
+function environmentIdentity(environment: ChatGptBrokerEnvironment): string {
+  if (isChatGptToolRegistryEnvironment(environment)) {
+    // The current Responses request is authoritative for its advertised tool registry. Tool search
+    // may legitimately expand that registry between rounds, so only bind the ownership mode here;
+    // opaque turn handles and call ids still prevent cross-turn capability reuse.
+    return JSON.stringify({ authority: environment.authority });
+  }
   return JSON.stringify({
     cwd: environment.cwd,
     roots: environment.roots,
@@ -178,23 +186,29 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
   });
 }
 
-function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
+function ownerEnvironment(value: unknown): ChatGptBrokerEnvironment {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("turn owner environment is invalid");
-  const environment = value as Partial<ChatGptTurnEnvironment>;
+  const environment = value as Partial<ChatGptTurnEnvironment> & { authority?: unknown };
   const paths = (candidate: unknown): candidate is string[] => Array.isArray(candidate)
     && candidate.length > 0
     && candidate.every(path => typeof path === "string" && isAbsolute(path));
-  if (typeof environment.cwd !== "string" || !isAbsolute(environment.cwd)
+  if (!Array.isArray(environment.tools)
+    || environment.tools.some(tool => !tool || typeof tool.name !== "string" || typeof tool.description !== "string"
+      || !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters))) {
+    throw new Error("turn owner environment is invalid");
+  }
+  if (environment.authority === "tool-registry") {
+    return structuredClone({ authority: "tool-registry" as const, tools: environment.tools });
+  }
+  if (environment.authority !== undefined
+    || typeof environment.cwd !== "string" || !isAbsolute(environment.cwd)
     || !paths(environment.roots) || !Array.isArray(environment.writableRoots)
     || environment.writableRoots.some(path => typeof path !== "string" || !isAbsolute(path))
     || !environment.roots.some(root => {
       const nested = relative(resolve(root), resolve(environment.cwd!));
       return nested === "" || (!nested.startsWith("..") && !isAbsolute(nested));
     })
-    || !environment.sandboxPolicy || !["dangerFullAccess", "workspaceWrite", "readOnly"].includes(environment.sandboxPolicy.type)
-    || !Array.isArray(environment.tools)
-    || environment.tools.some(tool => !tool || typeof tool.name !== "string" || typeof tool.description !== "string"
-      || !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters))) {
+    || !environment.sandboxPolicy || !["dangerFullAccess", "workspaceWrite", "readOnly"].includes(environment.sandboxPolicy.type)) {
     throw new Error("turn owner environment is invalid");
   }
   return structuredClone(environment as ChatGptTurnEnvironment);
@@ -207,14 +221,14 @@ function assertSurfaceNonce(value: unknown): asserts value is string {
 }
 
 export interface TurnBrokerOwner {
-  register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
+  register(environment: ChatGptBrokerEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
   registerSafe(
     environment: ChatGptTurnEnvironment,
     surfaceNonce: string,
     ttlMs?: number,
     traceId?: string,
   ): Promise<string>;
-  updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void | Promise<void>;
+  updateEnvironment(token: string, environment: ChatGptBrokerEnvironment): void | Promise<void>;
   confirmSafeTurnSent(
     token: string,
     surfaceNonce: string,
@@ -274,7 +288,7 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   async register(
-    environment: ChatGptTurnEnvironment,
+    environment: ChatGptBrokerEnvironment,
     ttlMs?: number,
     traceId = "unknown",
     externalOwner = false,
@@ -357,7 +371,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.compactionTransactions.abortTrace(traceId);
   }
 
-  updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void {
+  updateEnvironment(token: string, environment: ChatGptBrokerEnvironment): void {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
@@ -924,6 +938,9 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (request.method === "owner_register_safe") {
       const environment = ownerEnvironment(request.environment);
+      if (isChatGptToolRegistryEnvironment(environment)) {
+        throw new Error("Zero Risk requires a full trusted Codex environment");
+      }
       assertSurfaceNonce(request.surfaceNonce);
       if (request.traceId !== undefined && !/^[A-Za-z0-9_-]{6,128}$/.test(request.traceId)) {
         throw new Error("turn owner trace id is invalid");
@@ -1315,7 +1332,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
     }
   }
 
-  async register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId = "unknown"): Promise<string> {
+  async register(environment: ChatGptBrokerEnvironment, ttlMs?: number, traceId = "unknown"): Promise<string> {
     const response = await callTurnBroker<{ token?: unknown }>(this.socketPath, {
       method: "owner_register",
       environment,
@@ -1348,7 +1365,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
     return response.token;
   }
 
-  async updateEnvironment(token: string, environment: ChatGptTurnEnvironment): Promise<void> {
+  async updateEnvironment(token: string, environment: ChatGptBrokerEnvironment): Promise<void> {
     await callTurnBroker(this.socketPath, { method: "owner_update", token, environment });
   }
 

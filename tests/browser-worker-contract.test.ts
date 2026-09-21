@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptResponseProgressTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -990,6 +990,70 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
       expect(observations).toBe(scenario === "turn-deadline" ? 1 : 2);
       expect(waits).toBe(1);
     }
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
+test("missing-assistant grace follows visible generation instead of submit wall clock", async () => {
+  type Baseline = { initialTurnIdentities: string[]; domCache: Record<string, unknown> };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    isVisible: async () => false,
+  };
+  const assistantLocator = { id: "assistant" };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[data-turn-id=") ? assistantLocator : hiddenLocator,
+  } as unknown as Page;
+  const realDateNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  try {
+    const worker = ChatGptBrowserWorker.forProvider({
+      adapter: "chatgpt-web",
+      baseUrl: `browser://assistant-active-generation-${Math.random()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+    }) as unknown as {
+      waitForNewAssistantTurn(page: Page, baseline: Baseline, deadline: number | undefined): Promise<{
+        identity: string; locator: unknown;
+      }>;
+      submissionDomState(): Promise<{
+        turnIdentities: string[];
+        userIdentities: string[];
+        responseIdentities: string[];
+        visibleStopButtonCount: number;
+      }>;
+      waitForTurnDomOrExternalProgress(): Promise<void>;
+    };
+    let observations = 0;
+    let waits = 0;
+    worker.submissionDomState = async () => {
+      observations += 1;
+      const responseVisible = observations >= 3;
+      return {
+        turnIdentities: responseVisible
+          ? ["conversation-turn-user", "conversation-turn-assistant"]
+          : ["conversation-turn-user"],
+        userIdentities: ["conversation-turn-user"],
+        responseIdentities: responseVisible ? ["conversation-turn-assistant"] : [],
+        visibleStopButtonCount: responseVisible ? 0 : 1,
+      };
+    };
+    worker.waitForTurnDomOrExternalProgress = async () => {
+      waits += 1;
+      if (waits > 2) throw new Error("active generation did not preserve the assistant grace");
+      now += CHATGPT_RESPONSE_DOM_GRACE_MS + 1;
+    };
+
+    await expect(worker.waitForNewAssistantTurn(
+      page,
+      { initialTurnIdentities: [], domCache: {} },
+      undefined,
+    )).resolves.toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
+    expect(observations).toBe(3);
+    expect(waits).toBe(2);
   } finally {
     Date.now = realDateNow;
   }
@@ -3067,7 +3131,7 @@ test("Bigger Context fits mixed-density whole records within both token and comp
         systemPrompt: [],
         messages: contents.map((content, index) => ({ role: "user", content, timestamp: index + 1 })),
       },
-    }, capabilities, undefined, { experimentalMultipartParts: 3 });
+    }, capabilities, undefined, { experimentalMultipartParts: 6 });
     const multipart = compiled.multipart!;
     const records = multipart.parts.flatMap(part => JSON.parse(part).records);
     expect(records).toEqual(contents.map((content, message_index) => ({
@@ -3077,7 +3141,7 @@ test("Bigger Context fits mixed-density whole records within both token and comp
 
     const transaction = "ctx_0123456789abcdef0123456789abcdef";
     const stages = multipart.parts.slice(0, -1).map((payload, index) => (
-      formatChatGptWebMultipartStage(payload, transaction, index + 1, 3).text
+      formatChatGptWebMultipartStage(payload, transaction, index + 1, 6).text
     ));
     const final = formatChatGptWebMultipartCommit(multipart, transaction);
     const maxStageMessageTokens = Math.max(...stages.map(text => estimateTokens(text)));
@@ -3090,7 +3154,7 @@ test("Bigger Context fits mixed-density whole records within both token and comp
       estimateCompiledChatGptWebInputTokens(compiled, CHATGPT_WEB_MODEL_ID),
       Math.max(maxStageMessageTokens, finalMessageTokens),
       CHATGPT_WEB_MODEL_ID, "high", capabilities,
-      Math.max(maxStageChars, final.length), 3,
+      Math.max(maxStageChars, final.length), 6,
       { stagingEffort: stagingMode.effort, maxStageMessageTokens, maxStageChars, finalMessageTokens, finalMessageChars: final.length },
     )).not.toThrow();
   }
@@ -3116,7 +3180,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
-    3,
+    6,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     333_579,
@@ -3125,8 +3189,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
-    3,
-  )).toThrow("three-part ceiling");
+    6,
+  )).toThrow("six-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     222_385,
     95_000,
@@ -3152,7 +3216,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     plus,
     900_000,
-    3,
+    6,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     270_000,
@@ -3161,8 +3225,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     plus,
     900_000,
-    3,
-  )).toThrow("270,000-token three-part ceiling");
+    6,
+  )).toThrow("270,000-token six-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     180_000,
     80_000,
@@ -3179,7 +3243,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     pro,
     900_000,
-    3,
+    6,
   )).toThrow("ChatGPT message boundary");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     20_000,
@@ -3205,7 +3269,7 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     const inline = () => assertChatGptWebInputWithinLimits(tokens + 8_192, tokens, "gpt-5.6-sol", "high", plus, 300_000);
     const stage = () => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, tokens, 300_000);
     const final = () => assertChatGptWebMultipartInputWithinLimits(
-      tokens + 10_000, tokens, "gpt-5.6-sol", "high", plus, 300_000, 3,
+      tokens + 10_000, tokens, "gpt-5.6-sol", "high", plus, 300_000, 6,
       { stagingEffort: "medium", maxStageMessageTokens: 500, maxStageChars: 2_000, finalMessageTokens: tokens, finalMessageChars: 300_000 },
     );
     for (const preflight of [inline, stage, final]) {
@@ -3235,7 +3299,7 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     "low",
     plus,
     300_000,
-    3,
+    6,
     {
       stagingEffort: "medium",
       maxStageMessageTokens: 30_000,
@@ -3516,7 +3580,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -3542,6 +3606,49 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+});
+
+test("browser DOM health defers a missing-response verdict while generation remains active", () => {
+  const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const activeWithoutResponse = {
+    responsePresent: false,
+    running: true,
+    currentText: "",
+    completionActionVisible: false,
+  };
+
+  expect(tracker.update(activeWithoutResponse, 1_000)).toBeUndefined();
+  expect(tracker.update(activeWithoutResponse, 30_000)).toBeUndefined();
+  expect(tracker.update(activeWithoutResponse, 120_000)).toBeUndefined();
+
+  const inactiveWithoutResponse = { ...activeWithoutResponse, running: false };
+  expect(tracker.update(inactiveWithoutResponse, 120_100)).toBeUndefined();
+  expect(tracker.update(inactiveWithoutResponse, 121_099)).toBeUndefined();
+  expect(tracker.update(inactiveWithoutResponse, 121_100)).toContain("did not create a response DOM");
+});
+
+test("stalled-response diagnostics measure inactivity instead of total turn duration", () => {
+  const tracker = new ChatGptResponseProgressTracker(1_000);
+  const state = (text: string, running = true) => ({
+    responsePresent: true,
+    running,
+    currentText: text,
+    completionActionVisible: false,
+    traceBlocks: [],
+    externalProgressRevision: 0,
+  });
+
+  expect(tracker.update(state("a"), 1_000)).toBeFalse();
+  expect(tracker.update(state("ab"), 1_900)).toBeFalse();
+  expect(tracker.update(state("abc"), 2_800)).toBeFalse();
+  expect(tracker.update(state("abc"), 3_799)).toBeFalse();
+  expect(tracker.update(state("abc"), 3_800)).toBeTrue();
+  expect(tracker.update(state("abc"), 4_800)).toBeFalse();
+
+  // A stalled turn can recover; fresh content starts a new inactivity window instead of becoming
+  // a terminal verdict or inheriting the old stall timestamp.
+  expect(tracker.update(state("recovered"), 4_900)).toBeFalse();
+  expect(tracker.update(state("recovered", false), 5_100)).toBeFalse();
 });
 
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
@@ -3588,7 +3695,7 @@ test("suspending DOM health for proven MCP progress restarts the missing-respons
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -3613,7 +3720,7 @@ test("clearing the missing-response window preserves whether a response was ever
     currentText: "partial",
     completionActionVisible: false,
   };
-  const absent = { ...present, responsePresent: false, currentText: "" };
+  const absent = { ...present, responsePresent: false, running: false, currentText: "" };
 
   expect(tracker.update(present, 1_000)).toBeUndefined();
   expect(tracker.update(absent, 1_500)).toBeUndefined();
@@ -3684,7 +3791,7 @@ test("live external progress still records that a response DOM was observed", ()
   const tracker = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };

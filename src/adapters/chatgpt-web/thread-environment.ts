@@ -5,13 +5,17 @@ import { getCodexHome } from "../../codex-integration-shared";
 import type { CodexParsedRequest } from "../../types";
 import {
   extractChatGptTurnEnvironment,
+  extractCwdlessCurrentChatGptEnvironmentCandidate,
   extractChatGptCompactionSourceRevision,
   extractChatGptContinuationEnvironmentClaim,
+  extractChatGptSteeringEnvironmentClaim,
   extractChatGptTurnIdentity,
   extractChatGptThreadSpawnLineage,
   extractChatGptRootThreadMetadata,
   hasCurrentChatGptEnvironmentContext,
+  hasCwdlessCurrentChatGptEnvironmentContext,
   hasRawChatGptEnvironmentContext,
+  replayedChatGptEnvironmentClaims,
   unattributedChatGptEnvironmentMessages,
   isChatGptCompactionContinuation,
   MissingTrustedCodexEnvironmentError,
@@ -148,19 +152,33 @@ export class ChatGptThreadEnvironmentStore {
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
     const identity = extractChatGptTurnIdentity(parsed);
+    const cwdlessCurrentContext = Boolean(identity.threadId && identity.turnId)
+      && hasCwdlessCurrentChatGptEnvironmentContext(parsed);
     try {
+      // A cwd-less current filesystem envelope is only a delta. Do not let the low-level parser
+      // derive authority from its first workspace root; authenticate it against the native rollout.
+      if (cwdlessCurrentContext) throw new MissingTrustedCodexEnvironmentError("cwd");
       const environment = extractChatGptTurnEnvironment(parsed);
       if (identity.threadId) this.set(identity.threadId, environment);
       return environment;
     } catch (error) {
-      if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
+      if (!(error instanceof MissingTrustedCodexEnvironmentError)) throw error;
+      if (!identity.threadId) {
+        const legacy = this.resolveLegacyReplay(parsed);
+        if (legacy) return legacy;
+        throw error;
+      }
       const hasCurrentContext = hasCurrentChatGptEnvironmentContext(parsed);
       const lineage = extractChatGptThreadSpawnLineage(parsed);
       const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);
       const historicalMessages = hasCurrentContext && !currentCompaction && lineage
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
-      if (hasCurrentContext && !currentCompaction && !historicalMessages) throw error;
-      const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : undefined;
+      const steeringClaim = hasCurrentContext && !currentCompaction
+        ? extractChatGptSteeringEnvironmentClaim(parsed) : undefined;
+      if (hasCurrentContext && !currentCompaction && !historicalMessages && !steeringClaim && !cwdlessCurrentContext) throw error;
+      const currentClaim = currentCompaction && !cwdlessCurrentContext
+        ? extractChatGptContinuationEnvironmentClaim(parsed)
+        : steeringClaim;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
       // source turn_context. Either must be the latest native record, never an arbitrary ancestor.
@@ -177,8 +195,14 @@ export class ChatGptThreadEnvironmentStore {
           tools: parsed.context.tools,
         });
         if (rolloutEnvironment) {
+          if (cwdlessCurrentContext) {
+            const candidate = extractCwdlessCurrentChatGptEnvironmentCandidate(parsed, rolloutEnvironment.cwd);
+            if (!candidate || !sameAuthority(candidate, rolloutEnvironment)) {
+              throw new Error("Current Codex environment delta conflicts with its canonical rollout");
+            }
+          }
           if (currentClaim && !sameAuthority(currentClaim, rolloutEnvironment)) {
-            throw new Error("Compaction continuation environment conflicts with its current Codex rollout");
+            throw new Error(`${currentCompaction ? "Compaction continuation" : "Steering"} environment conflicts with its current Codex rollout`);
           }
           this.set(rolloutIdentity.threadId, rolloutEnvironment);
           return rolloutEnvironment;
@@ -220,6 +244,35 @@ export class ChatGptThreadEnvironmentStore {
       this.set(lineage.threadId, inherited);
       return inherited;
     }
+  }
+
+  private resolveLegacyReplay(parsed: CodexParsedRequest): ChatGptTurnEnvironment | undefined {
+    const claims = replayedChatGptEnvironmentClaims(parsed);
+    if (!claims) return undefined;
+
+    this.load();
+    const cutoff = this.now() - THREAD_ENVIRONMENT_TTL_MS;
+    const matches = [...this.threads.values()].filter(stored => {
+      if (stored.updatedAt < cutoff) return false;
+      const trusted: ChatGptTurnEnvironment = {
+        cwd: stored.cwd,
+        roots: stored.roots,
+        writableRoots: stored.writableRoots,
+        sandboxPolicy: stored.sandboxPolicy,
+        tools: [],
+      };
+      return claims.some(claim => sameAuthority(claim, trusted));
+    });
+    if (matches.length !== 1) return undefined;
+
+    const trusted = matches[0]!;
+    return {
+      cwd: trusted.cwd,
+      roots: trusted.roots,
+      writableRoots: trusted.writableRoots,
+      sandboxPolicy: trusted.sandboxPolicy,
+      tools: parsed.context.tools ?? [],
+    };
   }
 
   private get(threadId: string): StoredThreadEnvironment | undefined {

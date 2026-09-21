@@ -26,7 +26,7 @@ export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
   skillFiles?: ChatGptSkillFile[];
-  /** DEV-only transactional context transport. Production prompts remain inline. */
+  /** Transactional transport when Bigger Context is explicitly enabled. */
   multipart?: ChatGptWebMultipartPrompt;
   /** Oldest history items removed by native-style compaction fit recovery; absent on normal turns. */
   trimmedCompactionMessages?: number;
@@ -44,11 +44,13 @@ export interface CompileChatGptWebPromptOptions {
   manualControl?: true;
 }
 
-export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
+export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
 export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
-export type ChatGptWebMultipartParts =
-  | readonly [string, string]
-  | readonly [string, string, string];
+export type ChatGptWebMultipartParts = readonly string[];
+
+export function isChatGptWebMultipartPartCount(value: number): value is ChatGptWebMultipartPartCount {
+  return value === 2 || value === CHATGPT_BIGGER_CONTEXT_PARTS;
+}
 
 export interface ChatGptWebMultipartPrompt {
   parts: ChatGptWebMultipartParts;
@@ -73,14 +75,14 @@ export function formatChatGptWebMultipartStage(
   payload: string,
   transactionId: string,
   partIndex: number,
-  totalParts: ChatGptWebMultipartPartCount = CHATGPT_BIGGER_CONTEXT_PARTS,
+  totalParts: number = CHATGPT_BIGGER_CONTEXT_PARTS,
 ): ChatGptWebMultipartStage {
   assertMultipartTransactionId(transactionId);
   if (
     !Number.isInteger(partIndex)
     || partIndex < 1
     || partIndex > totalParts
-    || (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS)
+    || !isChatGptWebMultipartPartCount(totalParts)
   ) {
     throw new Error("ChatGPT multipart stage index is invalid");
   }
@@ -116,8 +118,8 @@ export function formatChatGptWebMultipartCommit(
 ): string {
   assertMultipartTransactionId(transactionId);
   const totalParts = multipart.parts.length;
-  if (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("ChatGPT multipart commit requires two or three staged parts");
+  if (!isChatGptWebMultipartPartCount(totalParts)) {
+    throw new Error("ChatGPT multipart commit requires two or six context parts");
   }
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
@@ -250,6 +252,34 @@ function plainMessageText(message: CodexMessage): string | undefined {
 
 function startsWithControlBlock(message: CodexMessage, tag: string): boolean {
   return message.role === "developer" && plainMessageText(message)?.trimStart().startsWith(tag) === true;
+}
+
+function toolChoiceContract(parsed: CodexParsedRequest): string[] {
+  if (parsed._compactionRequest) return [];
+  const choice = parsed.options.toolChoice;
+  if (choice === undefined || choice === "auto") return [];
+  if (choice === "none") {
+    return [
+      "This Responses request sets tool_choice to none. Do not call any Codex Native tool in this response.",
+    ];
+  }
+  if (choice === "required") {
+    return [
+      "This Responses request requires at least one outer Codex tool call before a final answer. Use the attached Codex Native gateway tools to execute an advertised Responses tool, and do not finish the response without completing that native tool round.",
+    ];
+  }
+  if ("name" in choice) {
+    return [
+      `This Responses request requires the outer Responses tool ${JSON.stringify(choice.name)}. Execute that exact wire tool through the attached Codex Native gateway before producing a final answer. If it is not exposed as a first-class attached tool, use codex_tool_inventory to inspect it and codex_tool_call with wire_name=${JSON.stringify(choice.name)} to invoke it. The gateway helper call is transport; the resulting outer tool call must still be ${JSON.stringify(choice.name)}.`,
+    ];
+  }
+  const names = choice.allowedTools.map(name => JSON.stringify(name)).join(", ");
+  return [
+    `This Responses request restricts outer Responses tool calls to this allowed set: ${names}. Use the attached Codex Native gateway to invoke only those wire tools; gateway discovery/invocation helpers are transport and do not expand the allowed outer set.`,
+    ...(choice.mode === "required"
+      ? ["At least one outer tool from that allowed set must complete before a final answer."]
+      : []),
+  ];
 }
 
 /**
@@ -401,8 +431,7 @@ function partitionMultipartContext(
     total_parts: totalParts,
     records: group,
   })));
-  if (totalParts === 2) return [payloads[0]!, payloads[1]!];
-  return [payloads[0]!, payloads[1]!, payloads[2]!];
+  return payloads;
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -451,8 +480,8 @@ export function compileChatGptWebPrompt(
       throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
     }
   }
-  if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("Bigger Context requires two or three multipart stages");
+  if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
+    throw new Error("Bigger Context requires two or six context parts");
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -542,6 +571,7 @@ export function compileChatGptWebPrompt(
       ]
       : []),
   ];
+  const requestToolChoiceContract = toolChoiceContract(parsed);
   const checkpointContract = captureLunaCheckpoint
     ? [
       "After the complete user-facing answer, append one private rolling task checkpoint for the next Luna turn.",
@@ -624,13 +654,12 @@ export function compileChatGptWebPrompt(
         version: 1, part_index: index + 1, total_parts: multipartParts, records: [],
       });
       const multipart: ChatGptWebMultipartPrompt = {
-        parts: multipartParts === 2
-          ? [emptyPart(0), emptyPart(1)]
-          : [emptyPart(0), emptyPart(1), emptyPart(2)],
+        parts: Array.from({ length: multipartParts! }, (_, index) => emptyPart(index)),
         commit: [
           ...sharedContract,
           ...skillContract,
           ...transportContract,
+          ...requestToolChoiceContract,
           ...outputControlContract,
           ...manualControlContract,
           ...checkpointContract,
@@ -668,6 +697,7 @@ export function compileChatGptWebPrompt(
       ...sharedContract,
       ...skillContract,
       ...transportContract,
+      ...requestToolChoiceContract,
       ...outputControlContract,
       ...manualControlContract,
       ...checkpointContract,

@@ -40,6 +40,7 @@ import {
   CHATGPT_MAX_INPUT_IMAGES,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  isChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
   type ChatGptWebPromptImage,
   type ChatGptWebMultipartStage,
@@ -71,6 +72,7 @@ import {
   notifyLauncherTurn,
 } from "../../launcher-browser-host";
 import {
+  CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
@@ -124,6 +126,7 @@ export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
+export const CHATGPT_RESPONSE_STALL_DIAGNOSTIC_MS = 60_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
@@ -915,7 +918,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
-  partCount: 2 | 3,
+  partCount: number,
   transport?: {
     stagingEffort: ChatGptWebModelMode["effort"];
     maxStageMessageTokens: number;
@@ -925,6 +928,9 @@ export function assertChatGptWebMultipartInputWithinLimits(
     finalImageTokens?: number;
   },
 ): void {
+  if (!isChatGptWebMultipartPartCount(partCount)) {
+    throw new Error("Bigger Context requires two or six context parts");
+  }
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
       "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
@@ -988,9 +994,10 @@ export function assertChatGptWebMultipartInputWithinLimits(
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = baseContextWindow * partCount;
+  // More transport messages do not enlarge the model's advertised context window.
+  const experimentalContextWindow = baseContextWindow * Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
   if (estimatedInputTokens < experimentalContextWindow) return;
-  const partLabel = partCount === 2 ? "two-part" : "three-part";
+  const partLabel = partCount === 2 ? "two-part" : "six-part";
   throw new ChatGptWebAdapterError(
     `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
@@ -1518,6 +1525,11 @@ export class ChatGptTurnDomHealthTracker {
     }
     if (state.responsePresent) {
       this.missingResponseSince = undefined;
+    } else if (state.running) {
+      // The response subtree may disappear while ChatGPT remounts or virtualizes the active turn.
+      // A live generation indicator is stronger evidence than the missing subtree, so do not
+      // charge that interval against the terminal missing-response grace period.
+      this.missingResponseSince = undefined;
     } else {
       this.missingResponseSince ??= now;
       if (now - this.missingResponseSince >= this.missingResponseMs) {
@@ -1552,6 +1564,48 @@ export class ChatGptTurnDomHealthTracker {
       return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
     }
     return undefined;
+  }
+}
+
+export class ChatGptResponseProgressTracker {
+  private signature?: string;
+  private lastProgressAt?: number;
+  private diagnosedProgressAt?: number;
+
+  constructor(private readonly stallMs = CHATGPT_RESPONSE_STALL_DIAGNOSTIC_MS) {}
+
+  update(state: {
+    responsePresent: boolean;
+    running: boolean;
+    currentText: string;
+    completionActionVisible: boolean;
+    traceBlocks: readonly ChatGptVisibleTraceBlock[];
+    externalProgressRevision: number;
+  }, now = Date.now()): boolean {
+    const trace = state.traceBlocks
+      .map(block => `${block.kind}\0${block.key ?? ""}\0${block.text}\0${block.complete === true ? "1" : "0"}`)
+      .join("\u0001");
+    const signature = [
+      state.responsePresent ? "1" : "0",
+      state.running ? "1" : "0",
+      state.completionActionVisible ? "1" : "0",
+      String(state.externalProgressRevision),
+      state.currentText,
+      trace,
+    ].join("\u0002");
+
+    if (signature !== this.signature) {
+      this.signature = signature;
+      this.lastProgressAt = now;
+      this.diagnosedProgressAt = undefined;
+      return false;
+    }
+    const lastProgressAt = this.lastProgressAt ?? now;
+    if (now - lastProgressAt < this.stallMs || this.diagnosedProgressAt === lastProgressAt) {
+      return false;
+    }
+    this.diagnosedProgressAt = lastProgressAt;
+    return true;
   }
 }
 
@@ -1612,6 +1666,7 @@ interface ChatGptResponseDomSnapshot {
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
   completionActionVisible: boolean;
+  streamingStatusVisible: boolean;
   stoppedThinkingVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -1629,6 +1684,7 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   fullHtml: "",
   markdownSegments: [],
   completionActionVisible: false,
+  streamingStatusVisible: false,
   stoppedThinkingVisible: false,
   traceBlocks: [],
 });
@@ -2899,6 +2955,15 @@ export class ChatGptBrowserWorker {
         locator: observationPage.locator(`[data-turn-id=${JSON.stringify(identity)}]`),
         acceptedTurnIdentities: state.turnIdentities,
       };
+      if (state.visibleStopButtonCount > 0) {
+        // Submission can be accepted and visibly generating before ChatGPT mounts the assistant
+        // turn. Keep the missing-assistant window relative to the last observed generation state;
+        // an explicit whole-turn deadline, when configured, still wins above.
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Date.now() + graceMs,
+        );
+      }
       // A delayed renderer wake can cross the grace while the assistant appears. Only a fresh
       // observation can prove it is still missing; the explicit turn deadline remains above.
       if (Date.now() >= responseDeadline
@@ -3520,9 +3585,10 @@ export class ChatGptBrowserWorker {
         continue;
       }
       const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+      const generationActive = running || snapshot.streamingStatusVisible;
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
-        running,
+        running: generationActive,
         currentText: snapshot.visibleText,
         completionActionVisible: snapshot.completionActionVisible,
         externalProgressLive,
@@ -3530,7 +3596,7 @@ export class ChatGptBrowserWorker {
       if (domError) throw new Error(domError);
       if (completionTracker.update({
         responsePresent: snapshot.responsePresent,
-        running,
+        running: generationActive,
         currentText: snapshot.visibleText,
         currentHtml: snapshot.fullHtml,
         completionActionVisible: snapshot.completionActionVisible,
@@ -4181,6 +4247,7 @@ export class ChatGptBrowserWorker {
           fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
           markdownSegments,
           completionActionVisible: completionAction !== undefined,
+          streamingStatusVisible: streamingStatusContainers.length > 0,
           stoppedThinkingVisible,
           traceBlocks,
         },
@@ -4828,9 +4895,7 @@ export class ChatGptBrowserWorker {
       let lastHeartbeat = 0;
       let finalText = "";
       let sawRunning = false;
-      let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -4855,6 +4920,7 @@ export class ChatGptBrowserWorker {
         });
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const responseProgressTracker = new ChatGptResponseProgressTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -4971,8 +5037,25 @@ export class ChatGptBrowserWorker {
           continue;
         }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        const running = await stop.isVisible().catch(() => false);
+        const stopButtonVisible = await stop.isVisible().catch(() => false);
+        const running = stopButtonVisible || snapshot.streamingStatusVisible;
         if (running) sawRunning = true;
+        if (responseProgressTracker.update({
+          responsePresent: snapshot.responsePresent,
+          running,
+          currentText: snapshot.visibleText,
+          completionActionVisible: snapshot.completionActionVisible,
+          traceBlocks: snapshot.traceBlocks,
+          externalProgressRevision: externalProgressSnapshot?.revision ?? 0,
+        })) {
+          await diagnostics.capture(page, "response-stalled-60s");
+          const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
+            diagnosticError: error instanceof Error ? error.message : String(error),
+          }));
+          console.warn(
+            `[chatgpt-web] response made no observable progress for 60s (running=${running}, stopButton=${stopButtonVisible}, streamingStatus=${snapshot.streamingStatusVisible}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+          );
+        }
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -5056,16 +5139,6 @@ export class ChatGptBrowserWorker {
               finalText = final.markdown;
             }
             break;
-          }
-          if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {
-            loggedCompletionWait = true;
-            await diagnostics.capture(page, "response-stalled-60s");
-            const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
-              diagnosticError: error instanceof Error ? error.message : String(error),
-            }));
-            console.warn(
-              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
-            );
           }
         } else {
           const domError = domHealthTracker.update({
