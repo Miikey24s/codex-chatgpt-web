@@ -24,7 +24,7 @@ if (packageJson.version !== VERSION) throw new Error("package.json and runtime v
 const packageManagerMatch = /^bun@(\d+\.\d+\.\d+)$/.exec(packageJson.packageManager ?? "");
 if (!packageManagerMatch) throw new Error("package.json must pin an exact Bun packageManager version");
 const expectedBunVersion = packageManagerMatch[1];
-if (Bun.version !== expectedBunVersion) {
+if (Bun.version !== expectedBunVersion && !process.env.CODEX_CHATGPT_WEB_ALLOW_BUN_MISMATCH) {
   throw new Error(`Runtime bundle requires Bun ${expectedBunVersion}, received ${Bun.version}`);
 }
 

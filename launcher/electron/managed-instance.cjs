@@ -114,6 +114,7 @@ class ManagedInstance {
       codexHome: this.codexHome,
       userData: this.userData,
       instancePort: this.instance.port,
+      instanceId: this.instance.id,
       launcherProfile: this.launcherProfile,
       publishOperation: operation => this.operation(operation),
       supervisor: this.runtimeSupervisor,

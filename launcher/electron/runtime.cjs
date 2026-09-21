@@ -173,6 +173,7 @@ class RuntimeHost {
     codexHome,
     userData,
     instancePort,
+    instanceId,
     launcherProfile = "production",
     launchAgentsDir,
     platform = process.platform,
@@ -205,6 +206,7 @@ class RuntimeHost {
       throw new Error("Runtime host instance port is invalid");
     }
     this.instancePort = instancePort;
+    this.instanceId = instanceId ?? null;
     this.launchAgentsDir = launchAgentsDir
       ? resolveUserPath(launchAgentsDir)
       : path.join(os.homedir(), "Library", "LaunchAgents");
@@ -248,6 +250,20 @@ class RuntimeHost {
       mode === "manual" ? "--zero-risk-browser-interaction" : "--automatic-browser-interaction",
       ...(mode === "automatic" && refreshCapabilities ? ["--refresh-account-capabilities"] : []),
     ];
+  }
+
+  expectedTunnelProfileName(interactionMode = this.browserInteractionMode()) {
+    let instanceId = this.instanceId;
+    if (!instanceId && this.coreHome) {
+      const parent = path.basename(path.dirname(this.coreHome));
+      const name = path.basename(this.coreHome);
+      if (parent.endsWith("-instances") || /^instance-[a-z0-9-]+$/i.test(name)) {
+        instanceId = name;
+      }
+    }
+    const isPrimary = !instanceId || instanceId === "primary";
+    const base = isPrimary ? "codex-chatgpt-web" : `codex-chatgpt-web-${instanceId}`;
+    return interactionMode === "manual" ? `${base}-zero-risk` : base;
   }
 
   assertProductionProfile(operation) {
@@ -1219,9 +1235,7 @@ class RuntimeHost {
     const connectorMigrationRequired = existing.mode === "full"
       && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
     const interactionMode = existing.config?.browserInteractionMode ?? "automatic";
-    const expectedTunnelProfile = interactionMode === "manual"
-      ? "codex-chatgpt-web-zero-risk"
-      : "codex-chatgpt-web";
+    const expectedTunnelProfile = this.expectedTunnelProfileName(interactionMode);
     const expectedKeyFile = interactionMode === "manual"
       ? "tunnel-runtime-zero-risk.key"
       : "tunnel-runtime-automatic.key";
@@ -1245,6 +1259,7 @@ class RuntimeHost {
     const args = [
       "setup",
       existing.mode === "full" ? "--full" : "--browser-only",
+      ...this.instancePortArgs(),
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       // A release may repair capability detection. Reusing the previous result can

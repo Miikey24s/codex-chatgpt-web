@@ -74,6 +74,8 @@ Setup options:
                                Re-read the authenticated account's available Web models
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
+  --tunnel-profile-name NAME   Tunnel profile name (default: auto-derived from instance)
+  --tunnel-alias ALIAS         Tunnel alias (default: matches profile name)
   --replace-codex-route        Reversibly replace existing Responses or Voice route settings
   --subagent-protocol MODE     compatibility-v1 (default) or native (advanced)
   --restart-service            Explicitly restart this project's daemon after an update
@@ -299,6 +301,10 @@ async function setupCommand(args: string[]): Promise<void> {
   options.refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
   if (tunnelId) options.tunnelId = tunnelId;
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
+  const tunnelProfileName = takeOption(args, "--tunnel-profile-name") ?? takeOption(args, "--profile-name");
+  const tunnelAlias = takeOption(args, "--tunnel-alias") ?? takeOption(args, "--alias");
+  if (tunnelProfileName) options.profileName = tunnelProfileName;
+  if (tunnelAlias) options.alias = tunnelAlias;
   options.forceLogin = takeFlag(args, "--login");
   options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
   const skillAttachments = takeFlag(args, "--skill-attachments");

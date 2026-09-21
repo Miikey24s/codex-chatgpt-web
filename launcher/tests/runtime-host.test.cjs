@@ -1278,3 +1278,32 @@ test("skill file experiment uses the setup transaction in production and DEV, an
   await assert.rejects(() => manual.host.setSkillAttachments(true), /Zero Risk/);
   assert.equal(manual.invocation(), undefined);
 });
+
+test("expectedTunnelProfileName isolates secondary instances and supports manual mode", () => {
+  const primaryHost = hostFor(null).host;
+  assert.equal(primaryHost.expectedTunnelProfileName("automatic"), "codex-chatgpt-web");
+  assert.equal(primaryHost.expectedTunnelProfileName("manual"), "codex-chatgpt-web-zero-risk");
+
+  const instance2Host = new RuntimeHost({
+    app: { getPath: () => "C:\\fake\\user-data", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/fake/descriptor.json",
+    coreHome: "C:\\fake\\.codex-chatgpt-web-instances\\instance-2",
+    instancePort: 17842,
+    instanceId: "instance-2",
+  });
+  assert.equal(instance2Host.expectedTunnelProfileName("automatic"), "codex-chatgpt-web-instance-2");
+  assert.equal(instance2Host.expectedTunnelProfileName("manual"), "codex-chatgpt-web-instance-2-zero-risk");
+
+  const inferredHost = new RuntimeHost({
+    app: { getPath: () => "C:\\fake\\user-data", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/fake/descriptor.json",
+    coreHome: "C:\\fake\\.codex-chatgpt-web-instances\\instance-3",
+    instancePort: 17843,
+  });
+  assert.equal(inferredHost.expectedTunnelProfileName("automatic"), "codex-chatgpt-web-instance-3");
+  assert.equal(inferredHost.expectedTunnelProfileName("manual"), "codex-chatgpt-web-instance-3-zero-risk");
+});

@@ -308,3 +308,21 @@ test("skill attachments config defaults off, reaches the adapter, and rejects in
   persist();
   expect(() => loadConfig()).toThrow("Zero Risk does not support Skills as files");
 });
+
+test("defaultTunnelBaseName and defaultTunnelProfileName isolate secondary instances", () => {
+  const { defaultTunnelBaseName, defaultTunnelProfileName } = require("../src/setup");
+  const primaryRoot = join(tmpdir(), ".codex-chatgpt-web");
+  expect(defaultTunnelBaseName(primaryRoot)).toBe("codex-chatgpt-web");
+  expect(defaultTunnelProfileName("automatic", primaryRoot)).toBe("codex-chatgpt-web");
+  expect(defaultTunnelProfileName("manual", primaryRoot)).toBe("codex-chatgpt-web-zero-risk");
+
+  const instance2Root = join(tmpdir(), ".codex-chatgpt-web-instances", "instance-2");
+  expect(defaultTunnelBaseName(instance2Root)).toBe("codex-chatgpt-web-instance-2");
+  expect(defaultTunnelProfileName("automatic", instance2Root)).toBe("codex-chatgpt-web-instance-2");
+  expect(defaultTunnelProfileName("manual", instance2Root)).toBe("codex-chatgpt-web-instance-2-zero-risk");
+
+  const instance3Root = join(tmpdir(), "other-instances", "instance-3");
+  expect(defaultTunnelBaseName(instance3Root)).toBe("codex-chatgpt-web-instance-3");
+  expect(defaultTunnelProfileName("automatic", instance3Root)).toBe("codex-chatgpt-web-instance-3");
+});
+

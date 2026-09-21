@@ -1,12 +1,13 @@
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AppConfig, BrowserInteractionMode, RuntimeMode, SubagentProtocol } from "./config";
 import {
   currentRuntimeCommand,
   defaultBrokerEndpoint,
   defaultConfig,
+  getConfigDir,
   getConfigPath,
   loadConfigForSetup,
   resolveInteractionConnectorIdentities,
@@ -61,6 +62,8 @@ export interface SetupOptions {
   tunnelId?: string;
   runtimeKeyFile?: string;
   runtimeKeyValue?: string;
+  profileName?: string;
+  alias?: string;
 }
 
 export interface SetupResult {
@@ -333,6 +336,23 @@ async function inspectLauncherCapabilities(
   };
 }
 
+export function defaultTunnelBaseName(configDir: string = getConfigDir()): string {
+  const dirName = basename(configDir);
+  const parentName = basename(dirname(configDir));
+  if (parentName.endsWith("-instances") || /^instance-[a-z0-9-]+$/i.test(dirName)) {
+    return `codex-chatgpt-web-${dirName}`;
+  }
+  return "codex-chatgpt-web";
+}
+
+export function defaultTunnelProfileName(
+  interactionMode: BrowserInteractionMode,
+  configDir: string = getConfigDir(),
+): string {
+  const base = defaultTunnelBaseName(configDir);
+  return interactionMode === "manual" ? `${base}-zero-risk` : base;
+}
+
 async function configureTunnel(config: AppConfig, existing: AppConfig | undefined, options: SetupOptions): Promise<void> {
   if (config.mode === "browser-only") {
     delete config.tunnel;
@@ -368,18 +388,17 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
     throw new Error(`${interactionMode === "manual" ? "Zero Risk" : "Automatic"} mode requires its own runtime key`);
   }
   const installedBinary = await installTunnelClient();
-  const productionProfileName = interactionMode === "manual"
-    ? "codex-chatgpt-web-zero-risk"
-    : "codex-chatgpt-web";
+  const defaultProfile = defaultTunnelProfileName(interactionMode, getConfigDir());
   const profileName = config.purpose === DEV_CONFIG_PURPOSE
     ? interactionMode === "manual" ? `${DEV_TUNNEL_BASE_NAME}-zero-risk` : DEV_TUNNEL_BASE_NAME
-    : productionProfileName;
+    : options.profileName ?? defaultProfile;
+  const alias = options.alias ?? profileName;
   const configuredTunnel = createTunnelConfig({
     binaryPath: installedBinary,
     tunnelId,
     runtimeKeyFile,
     profileName,
-    alias: profileName,
+    alias,
   });
   const otherTunnel = interactionMode === "manual" ? automaticTunnel : manualTunnel;
   if (otherTunnel?.tunnelId === configuredTunnel.tunnelId) {
