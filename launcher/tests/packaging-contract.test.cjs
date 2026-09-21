@@ -95,11 +95,13 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${manifest.build.nsis.guid}`));
   assert.ok(devProfile.includes(`WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"`));
   assert.match(windowsInstaller, /Get-ItemPropertyValue[\s\S]*InstallLocation/);
+  assert.match(windowsInstaller, /Join-Path \$env:LOCALAPPDATA "Programs\\Codex Web GPT"/);
   assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.productName}.exe"`));
   assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
-  assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
+  assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\], \{ timeout: 300_000 \}\)/);
   assert.match(packageSmoke, /reg\.exe[\s\S]*InstallLocation/);
+  assert.match(packageSmoke, /LOCALAPPDATA[\s\S]*Programs[\s\S]*productName/);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

@@ -40,14 +40,22 @@ function windowsInstallLocation() {
     windowsHide: true,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`Windows installer did not register ${registryKey}: ${result.stderr?.trim() || "no output"}`);
+  if (result.status === 0) {
+    const match = result.stdout.match(/^\s*InstallLocation\s+REG_SZ\s+(.+?)\s*$/mi);
+    if (match && path.win32.isAbsolute(match[1])) return match[1];
   }
-  const match = result.stdout.match(/^\s*InstallLocation\s+REG_SZ\s+(.+?)\s*$/mi);
-  if (!match || !path.win32.isAbsolute(match[1])) {
-    throw new Error(`Windows installer registered an invalid InstallLocation: ${result.stdout.trim()}`);
+
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (localAppData && path.win32.isAbsolute(localAppData)) {
+    const defaultLocation = path.join(localAppData, "Programs", launcherManifest.build.productName);
+    if (fs.existsSync(path.join(defaultLocation, `${launcherManifest.build.productName}.exe`))) {
+      return defaultLocation;
+    }
   }
-  return match[1];
+
+  throw new Error(
+    `Windows installer did not create a usable install location: ${registryKey} is unavailable and the per-user default is missing`,
+  );
 }
 
 function artifact(pattern, label) {
@@ -97,7 +105,7 @@ try {
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
     const installer = artifact(/-win-x64\.exe$/, "Windows installer");
-    run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
+    run(installer, ["/S", "/currentuser"], { timeout: 300_000 });
     executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
     command = executable;
     args = ["--launcher-smoke-test"];

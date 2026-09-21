@@ -73,9 +73,13 @@ try {
   $Process = Start-Process -FilePath $Installer -ArgumentList "/S", "/currentuser" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
   $InstallRegistry = "HKCU:\Software\d1a6026a-6210-588e-9a2b-da3936f94e02"
-  $InstallLocation = [string](Get-ItemPropertyValue -LiteralPath $InstallRegistry -Name "InstallLocation")
+  $InstallLocation = if (Test-Path -LiteralPath $InstallRegistry) {
+    [string](Get-ItemPropertyValue -LiteralPath $InstallRegistry -Name "InstallLocation" -ErrorAction SilentlyContinue)
+  } else {
+    Join-Path $env:LOCALAPPDATA "Programs\Codex Web GPT"
+  }
   if (-not (Test-IsFullyQualifiedWindowsPath $InstallLocation)) {
-    throw "Installer recorded an invalid InstallLocation: $InstallLocation"
+    throw "Installer did not provide a valid install location: $InstallLocation"
   }
   $Executable = Join-Path $InstallLocation "Codex Web GPT.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }
