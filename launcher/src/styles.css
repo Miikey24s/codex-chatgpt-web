@@ -449,6 +449,8 @@ code {
 .workspace {
   position: relative;
   z-index: 0;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   flex: 1;
@@ -459,9 +461,17 @@ code {
   -webkit-backdrop-filter: blur(22px) saturate(1.04);
 }
 
+.surface-instance-banner {
+  flex: 0 0 auto;
+}
+
 .surface-transition {
   width: 100%;
   height: 100%;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .state-dot {
@@ -926,8 +936,10 @@ code {
 
 .content-scroll.is-fit {
   display: flex;
-  overflow: hidden;
-  padding: 0 0 12px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 0 16px;
   flex-direction: column;
 }
 
@@ -2101,7 +2113,8 @@ code {
 
 .guide-media {
   position: relative;
-  width: min(90%, clamp(511px, 44vw, 620px));
+  width: min(90%, clamp(420px, 40vw, 560px));
+  max-height: clamp(140px, 24vh, 220px);
   height: auto;
   aspect-ratio: 192 / 103;
   align-self: center;
@@ -2326,9 +2339,32 @@ code {
   align-items: center;
   justify-content: space-between;
   flex: none;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 0;
+  margin-top: 14px;
+  padding: 10px 0;
+  border-top: 1px solid var(--color-border-light);
+  background: rgb(24 24 24 / 95%);
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+}
+
+.mcp-step-two-footer-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.mcp-step-two-footer-inline .mcp-step-two-hint {
+  margin: 0;
+  flex: 1;
+}
+
+.mcp-step-two-action-btn {
+  flex: none;
 }
 
 .mcp-stage .inline-actions,

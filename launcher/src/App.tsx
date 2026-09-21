@@ -1808,6 +1808,9 @@ function McpSurface({
                 <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.keys)}>
                   {copy.openKeys}
                 </SecondaryButton>
+                <PrimaryButton disabled={busy} onClick={() => void safeMove(1)}>
+                  {copy.next} →
+                </PrimaryButton>
               </div>
             ) : null}
             {step === 1 ? (
@@ -1869,9 +1872,22 @@ function McpSurface({
               )
             ) : null}
             {step === 1 ? (
-              <p className="mcp-step-two-hint">
-                {copy.mcpStepTwoHint}
-              </p>
+              <div className="mcp-step-two-footer-inline">
+                <p className="mcp-step-two-hint">
+                  {copy.mcpStepTwoHint}
+                </p>
+                <div className="mcp-step-two-action-btn">
+                  <PrimaryButton
+                    disabled={
+                      busy
+                      || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
+                    }
+                    onClick={() => void install()}
+                  >
+                    {busy ? copy.running : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
+                  </PrimaryButton>
+                </div>
+              </div>
             ) : null}
             {step === 2 ? (
               <div className="connector-actions">
