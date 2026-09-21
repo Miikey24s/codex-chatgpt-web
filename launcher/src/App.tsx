@@ -385,6 +385,9 @@ function LauncherShell({
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const selectedInstance = snapshot.instances.find(instance => instance.id === snapshot.selectedInstanceId)
+    ?? snapshot.instances[0];
+  const isInstanceScopedSurface = ["browser", "setup", "mcp", "diagnostics"].includes(surface);
 
   useEffect(() => {
     if (snapshot.state.browserInteractionMode === "manual") {
@@ -622,6 +625,27 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {isInstanceScopedSurface && selectedInstance ? (
+          <header className="surface-instance-banner">
+            <button className="back-to-instances-button" onClick={() => navigateSurface("instances")} type="button">
+              <Icon name="back" />
+              <span>Instances</span>
+            </button>
+            <div className="surface-instance-meta">
+              <strong>{selectedInstance.name}</strong>
+              <code>:{selectedInstance.port}</code>
+              <span className={`cockpit-badge is-${selectedInstance.enabled ? "enabled" : "disabled"}`}>
+                <StateDot state={selectedInstance.enabled ? "ready" : "idle"} />
+                {selectedInstance.enabled ? "Cockpit Enabled" : "Cockpit Disabled"}
+              </span>
+            </div>
+            <div className="surface-instance-nav">
+              <button className={surface === "browser" ? "is-active" : ""} onClick={() => navigateSurface("browser")} type="button">Browser</button>
+              <button className={surface === "setup" || surface === "mcp" ? "is-active" : ""} onClick={() => navigateSurface("setup")} type="button">Setup</button>
+              <button className={surface === "diagnostics" ? "is-active" : ""} onClick={() => navigateSurface("diagnostics")} type="button">Diagnostics</button>
+            </div>
+          </header>
+        ) : null}
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             animate={{ opacity: 1 }}
@@ -893,7 +917,7 @@ function InstancesSurface({
       <div className="instance-table-wrap">
         <table className="instance-table">
           <thead>
-            <tr><th>Status</th><th>Name</th><th>Account</th><th>Endpoint</th><th>Health</th><th>Cockpit</th></tr>
+            <tr><th>Status</th><th>Name</th><th>Account</th><th>Endpoint</th><th>Health</th><th>Cockpit</th><th>Actions</th></tr>
           </thead>
           <tbody>
             {snapshot.instances.map((instance) => {
@@ -913,7 +937,48 @@ function InstancesSurface({
                   <td>{signedIn ? "Signed in" : "Signed out"}</td>
                   <td><code>:{instance.port}</code></td>
                   <td>{instance.configured ? (instance.initialized ? "Ready" : "Configured") : "Setup needed"}</td>
-                  <td>{instance.enabled ? "Enabled" : "Disabled"}</td>
+                  <td>
+                    <span className={`cockpit-badge is-${instance.enabled ? "enabled" : "disabled"}`}>
+                      <StateDot state={instance.enabled ? "ready" : "idle"} />
+                      {instance.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="instance-row-actions">
+                      {instance.enabled && instance.id !== "primary" ? (
+                        <button
+                          className="table-action-button"
+                          disabled={actionBusy}
+                          onClick={() => void run(instance.id, () => api!.stopInstance(instance.id))}
+                          title="Disable and stop instance"
+                          type="button"
+                        >
+                          Stop
+                        </button>
+                      ) : !instance.enabled ? (
+                        <button
+                          className="table-action-button is-primary"
+                          disabled={actionBusy || !instance.configured}
+                          onClick={() => void run(instance.id, () => api!.startInstance(instance.id))}
+                          title={!instance.configured ? "Complete setup before starting" : "Start and enable instance"}
+                          type="button"
+                        >
+                          Start
+                        </button>
+                      ) : null}
+                      {instance.id !== "primary" ? (
+                        <button
+                          className="table-action-button is-danger"
+                          disabled={actionBusy}
+                          onClick={() => void remove(instance)}
+                          title="Delete instance"
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
                 </tr>
               );
             })}
@@ -924,22 +989,54 @@ function InstancesSurface({
       {selected ? (
         <section className="instance-detail">
           <header>
-            <div>
-              <span>Selected instance</span>
-              <h2>{selected.name}</h2>
-              <p><code>127.0.0.1:{selected.port}</code> · {selected.browser?.authenticated ? "Signed in" : "Signed out"}</p>
+            <div className="instance-detail-info">
+              <span className="instance-detail-kicker">Selected instance</span>
+              <div className="instance-detail-title-row">
+                <h2>{selected.name}</h2>
+                <span className={`cockpit-badge is-${selected.enabled ? "enabled" : "disabled"}`}>
+                  <StateDot state={selected.enabled ? "ready" : "idle"} />
+                  {selected.enabled ? "Cockpit: Enabled" : "Cockpit: Disabled"}
+                </span>
+              </div>
+              <p>
+                <code>127.0.0.1:{selected.port}</code> · {selected.browser?.authenticated ? "Signed in to ChatGPT" : "Signed out"}
+                · {selected.configured ? (selected.initialized ? "Ready" : "Configured") : "Setup needed"}
+              </p>
             </div>
             <div className="instance-runtime-actions">
               {selected.enabled ? (
                 <SecondaryButton disabled={actionBusy} icon="reload" onClick={() => void run(selected.id, () => api!.restartInstance(selected.id))}>Restart</SecondaryButton>
               ) : (
-                <PrimaryButton disabled={actionBusy || !selected.configured} onClick={() => void run(selected.id, () => api!.startInstance(selected.id))}>Start</PrimaryButton>
+                <PrimaryButton disabled={actionBusy || !selected.configured} onClick={() => void run(selected.id, () => api!.startInstance(selected.id))}>
+                  Start &amp; Enable
+                </PrimaryButton>
               )}
               {selected.enabled && selected.id !== "primary" ? (
-                <SecondaryButton disabled={actionBusy} icon="minus" onClick={() => void run(selected.id, () => api!.stopInstance(selected.id))}>Stop</SecondaryButton>
+                <SecondaryButton disabled={actionBusy} icon="minus" onClick={() => void run(selected.id, () => api!.stopInstance(selected.id))}>
+                  Stop &amp; Disable
+                </SecondaryButton>
+              ) : null}
+              {selected.id !== "primary" ? (
+                <SecondaryButton disabled={actionBusy} icon="trash" onClick={() => void remove(selected)} tone="danger">
+                  Delete instance
+                </SecondaryButton>
               ) : null}
             </div>
           </header>
+
+          {!selected.configured ? (
+            <div className="instance-setup-banner">
+              <Icon name="alert" />
+              <div className="instance-setup-banner-text">
+                <strong>Setup required before starting</strong>
+                <p>This instance needs initial ChatGPT login and runtime setup before it can be started and routed in Cockpit.</p>
+              </div>
+              <PrimaryButton onClick={() => openSurface("setup")}>
+                Configure Setup Now →
+              </PrimaryButton>
+            </div>
+          ) : null}
+
           <div className="instance-detail-tabs">
             <SecondaryButton icon="browser" onClick={() => openSurface("browser")}>Browser</SecondaryButton>
             <SecondaryButton icon="setup" onClick={() => openSurface("setup")}>Setup</SecondaryButton>
@@ -948,6 +1045,50 @@ function InstancesSurface({
             {selected.id !== "primary" ? (
               <button className="instance-remove-button" disabled={actionBusy} onClick={() => void remove(selected)} type="button">Remove</button>
             ) : null}
+          </div>
+
+          <div className="instance-cards-grid">
+            <div className="instance-card" onClick={() => openSurface("browser")} role="button" tabIndex={0}>
+              <div className="instance-card-header">
+                <div className="instance-card-icon"><Icon name="browser" /></div>
+                <div className="instance-card-title">
+                  <strong>Browser Session</strong>
+                  <span>{selected.browser?.authenticated ? "Signed in" : "Not signed in"}</span>
+                </div>
+              </div>
+              <p className="instance-card-desc">Isolated ChatGPT browser profile and session storage for this account.</p>
+              <div className="instance-card-footer">
+                <span className="instance-card-link">Open Browser →</span>
+              </div>
+            </div>
+
+            <div className="instance-card" onClick={() => openSurface("setup")} role="button" tabIndex={0}>
+              <div className="instance-card-header">
+                <div className="instance-card-icon"><Icon name="setup" /></div>
+                <div className="instance-card-title">
+                  <strong>Setup &amp; MCP</strong>
+                  <span>{selected.configured ? "Configured" : "Setup needed"}</span>
+                </div>
+              </div>
+              <p className="instance-card-desc">Configure MCP connectors, auth tokens, and runtime interaction mode.</p>
+              <div className="instance-card-footer">
+                <span className="instance-card-link">{selected.configured ? "Manage Setup →" : "Complete Setup →"}</span>
+              </div>
+            </div>
+
+            <div className="instance-card" onClick={() => openSurface("diagnostics")} role="button" tabIndex={0}>
+              <div className="instance-card-header">
+                <div className="instance-card-icon"><Icon name="activity" /></div>
+                <div className="instance-card-title">
+                  <strong>Diagnostics</strong>
+                  <span>Health check</span>
+                </div>
+              </div>
+              <p className="instance-card-desc">Run self-check doctor report and verify connection to port {selected.port}.</p>
+              <div className="instance-card-footer">
+                <span className="instance-card-link">Run Diagnostics →</span>
+              </div>
+            </div>
           </div>
         </section>
       ) : null}
@@ -2435,14 +2576,16 @@ function SecondaryButton({
   disabled = false,
   icon,
   onClick,
+  tone,
 }: {
   children: ReactNode;
   disabled?: boolean;
   icon?: IconName;
   onClick: () => void;
+  tone?: "danger";
 }) {
   return (
-    <button className="button-secondary" disabled={disabled} onClick={onClick} type="button">
+    <button className={`button-secondary${tone ? ` is-${tone}` : ""}`} disabled={disabled} onClick={onClick} type="button">
       {icon ? <Icon name={icon} /> : null}
       <span>{children}</span>
     </button>
