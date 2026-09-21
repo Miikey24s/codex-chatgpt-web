@@ -200,6 +200,10 @@ const en = {
   doctorLoginVerified: "ChatGPT login state has authenticated browser evidence",
   doctorMacServiceLoaded: "macOS background service is loaded",
   doctorMacTunnelRunning: "macOS tunnel service is installed, loaded, and running",
+  subagentProtocol: "Subagent Protocol",
+  subagentProtocolBody: "Choose between Native V2 (autonomous subagent orchestration and multi-agent delegation) and Compatibility V1.",
+  subagentProtocolNative: "Native V2",
+  subagentProtocolCompatibilityV1: "Compatibility V1",
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
@@ -402,6 +406,10 @@ const zh: Record<keyof typeof en, string> = {
   doctorLoginVerified: "已通过浏览器验证 ChatGPT 登录状态",
   doctorMacServiceLoaded: "已加载 macOS 后台服务",
   doctorMacTunnelRunning: "macOS 隧道服务已安装、加载并运行",
+  subagentProtocol: "Subagent 协议",
+  subagentProtocolBody: "在 Native V2（自主子代理编排与多代理委派）与 Compatibility V1 之间切换。",
+  subagentProtocolNative: "Native V2",
+  subagentProtocolCompatibilityV1: "Compatibility V1",
 };
 
 const ja: Record<keyof typeof en, string> = {
@@ -604,6 +612,10 @@ const ja: Record<keyof typeof en, string> = {
   doctorLoginVerified: "ChatGPT のログイン状態はブラウザーで認証済みです",
   doctorMacServiceLoaded: "macOS バックグラウンドサービスは読み込み済みです",
   doctorMacTunnelRunning: "macOS トンネルサービスはインストール・読み込み済みで稼働中です",
+  subagentProtocol: "サブエージェントプロトコル",
+  subagentProtocolBody: "Native V2（自律型サブエージェントのオーケストレーションとマルチエージェント委譲）と Compatibility V1 を切り替えます。",
+  subagentProtocolNative: "Native V2",
+  subagentProtocolCompatibilityV1: "Compatibility V1",
 };
 
 const ko: Record<keyof typeof en, string> = {
@@ -806,6 +818,10 @@ const ko: Record<keyof typeof en, string> = {
   doctorLoginVerified: "브라우저에서 ChatGPT 로그인 상태를 확인했습니다",
   doctorMacServiceLoaded: "macOS 백그라운드 서비스가 로드되어 있습니다",
   doctorMacTunnelRunning: "macOS 터널 서비스가 설치 및 로드되어 실행 중입니다",
+  subagentProtocol: "서브에이전트 프로토콜",
+  subagentProtocolBody: "Native V2(자율 서브에이전트 오케스트레이션 및 멀티 에이전트 위임)와 Compatibility V1 간 전환합니다.",
+  subagentProtocolNative: "Native V2",
+  subagentProtocolCompatibilityV1: "Compatibility V1",
 };
 
 const zhTW: Record<keyof typeof en, string> = {
@@ -1008,6 +1024,10 @@ const zhTW: Record<keyof typeof en, string> = {
   doctorLoginVerified: "已透過瀏覽器驗證 ChatGPT 登入狀態",
   doctorMacServiceLoaded: "已載入 macOS 背景服務",
   doctorMacTunnelRunning: "macOS 隧道服務已安裝、載入並執行",
+  subagentProtocol: "Subagent 協定",
+  subagentProtocolBody: "在 Native V2（自主子代理協調與多代理委派）與 Compatibility V1 之間切換。",
+  subagentProtocolNative: "Native V2",
+  subagentProtocolCompatibilityV1: "Compatibility V1",
 };
 
 export type Copy = typeof en;

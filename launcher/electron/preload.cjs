@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   restartInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-restart", instanceId),
   removeInstance: (instanceId, options) => ipcRenderer.invoke("launcher:instance-remove", instanceId, options),
   syncCockpitPool: () => ipcRenderer.invoke("launcher:cockpit-pool-sync"),
+  setSubagentProtocol: (instanceId, protocol) => ipcRenderer.invoke("launcher:instance-subagent-protocol", instanceId, protocol),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(

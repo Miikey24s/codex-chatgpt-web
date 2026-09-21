@@ -665,6 +665,9 @@ function LauncherShell({
                 <StateDot state={selectedInstance.enabled ? "ready" : "idle"} />
                 {selectedInstance.enabled ? "Cockpit Enabled" : "Cockpit Disabled"}
               </span>
+              <span className={`subagent-badge is-${selectedInstance.subagentProtocol === "native" ? "native" : "compat"}`}>
+                {selectedInstance.subagentProtocol === "native" ? copy.subagentProtocolNative : copy.subagentProtocolCompatibilityV1}
+              </span>
             </div>
             <div className="surface-instance-nav">
               <button className={surface === "browser" ? "is-active" : ""} onClick={() => navigateSurface("browser")} type="button">Browser</button>
@@ -685,6 +688,7 @@ function LauncherShell({
             {surface === "instances" ? (
               <InstancesSurface
                 busy={operation?.status === "running"}
+                copy={copy}
                 devProfile={devProfile}
                 openSurface={navigateSurface}
                 refreshSnapshot={refreshSnapshot}
@@ -750,6 +754,7 @@ function LauncherShell({
                 copy={copy}
                 devProfile={devProfile}
                 language={language}
+                refreshSnapshot={refreshSnapshot}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -855,6 +860,7 @@ function SidebarItem({
 
 function InstancesSurface({
   busy,
+  copy,
   devProfile,
   openSurface,
   refreshSnapshot,
@@ -862,6 +868,7 @@ function InstancesSurface({
   snapshot,
 }: {
   busy: boolean;
+  copy: Copy;
   devProfile: boolean;
   openSurface: (surface: Surface) => void;
   refreshSnapshot: () => Promise<void>;
@@ -886,6 +893,11 @@ function InstancesSurface({
     } finally {
       setActionInstanceId(null);
     }
+  };
+
+  const switchSubagentProtocol = async (instanceId: string, protocol: "compatibility-v1" | "native") => {
+    if (actionBusy) return;
+    await run(instanceId, () => api!.setSubagentProtocol(instanceId, protocol));
   };
 
   const create = async () => {
@@ -950,6 +962,7 @@ function InstancesSurface({
               <th>Name</th>
               <th>Account</th>
               <th>Endpoint</th>
+              <th>{copy.subagentProtocol}</th>
               <th>Health</th>
               <th>Cockpit</th>
               <th>Actions</th>
@@ -997,6 +1010,11 @@ function InstancesSurface({
                   </td>
                   <td>{signedIn ? "Signed in" : "Signed out"}</td>
                   <td><code>:{instance.port}</code></td>
+                  <td>
+                    <span className={`subagent-badge is-${instance.subagentProtocol === "native" ? "native" : "compat"}`}>
+                      {instance.subagentProtocol === "native" ? copy.subagentProtocolNative : copy.subagentProtocolCompatibilityV1}
+                    </span>
+                  </td>
                   <td>{instance.configured ? (instance.initialized ? "Ready" : "Configured") : "Setup needed"}</td>
                   <td>
                     <span className={`cockpit-badge is-${instance.enabled ? "enabled" : "disabled"}`}>
@@ -1102,10 +1120,14 @@ function InstancesSurface({
                   <StateDot state={selected.enabled ? "ready" : "idle"} />
                   {selected.enabled ? "Cockpit: Enabled" : "Cockpit: Disabled"}
                 </span>
+                <span className={`subagent-badge is-${selected.subagentProtocol === "native" ? "native" : "compat"}`}>
+                  {selected.subagentProtocol === "native" ? copy.subagentProtocolNative : copy.subagentProtocolCompatibilityV1}
+                </span>
               </div>
               <p>
                 <code>127.0.0.1:{selected.port}</code> · {selected.browser?.authenticated ? "Signed in to ChatGPT" : "Signed out"}
                 · {selected.configured ? (selected.initialized ? "Ready" : "Configured") : "Setup needed"}
+                · {copy.subagentProtocol}: <span className={`subagent-badge is-${selected.subagentProtocol === "native" ? "native" : "compat"}`}>{selected.subagentProtocol === "native" ? copy.subagentProtocolNative : copy.subagentProtocolCompatibilityV1}</span>
               </p>
             </div>
             <div className="instance-runtime-actions">
@@ -1192,6 +1214,39 @@ function InstancesSurface({
               <p className="instance-card-desc">Run self-check doctor report and verify connection to port {selected.port}.</p>
               <div className="instance-card-footer">
                 <span className="instance-card-link">Run Diagnostics →</span>
+              </div>
+            </div>
+
+            <div className="instance-card is-control-card">
+              <div className="instance-card-header">
+                <div className="instance-card-icon"><Icon name="settings" /></div>
+                <div className="instance-card-title">
+                  <strong>{copy.subagentProtocol}</strong>
+                  <span className={`subagent-badge is-${selected.subagentProtocol === "native" ? "native" : "compat"}`}>
+                    {selected.subagentProtocol === "native" ? copy.subagentProtocolNative : copy.subagentProtocolCompatibilityV1}
+                  </span>
+                </div>
+              </div>
+              <p className="instance-card-desc">{copy.subagentProtocolBody}</p>
+              <div className="instance-card-footer" onClick={(e) => e.stopPropagation()}>
+                <div aria-label={copy.subagentProtocol} className="subagent-toggle-group" role="group">
+                  <button
+                    className={`subagent-toggle-btn ${selected.subagentProtocol === "native" ? "is-active" : ""}`}
+                    disabled={actionBusy || selected.subagentProtocol === "native"}
+                    onClick={() => void switchSubagentProtocol(selected.id, "native")}
+                    type="button"
+                  >
+                    {copy.subagentProtocolNative}
+                  </button>
+                  <button
+                    className={`subagent-toggle-btn ${selected.subagentProtocol !== "native" ? "is-active is-compat" : ""}`}
+                    disabled={actionBusy || selected.subagentProtocol === "compatibility-v1"}
+                    onClick={() => void switchSubagentProtocol(selected.id, "compatibility-v1")}
+                    type="button"
+                  >
+                    {copy.subagentProtocolCompatibilityV1}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -2026,6 +2081,7 @@ function SettingsSurface({
   copy,
   devProfile,
   language,
+  refreshSnapshot,
   setError,
   snapshot,
   updateState,
@@ -2034,6 +2090,7 @@ function SettingsSurface({
   copy: Copy;
   devProfile: boolean;
   language: Language;
+  refreshSnapshot: () => Promise<void>;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -2042,6 +2099,22 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const selectedInstance = snapshot.instances.find(instance => instance.id === snapshot.selectedInstanceId)
+    ?? snapshot.instances[0];
+
+  const switchSubagentProtocol = async (protocol: "compatibility-v1" | "native") => {
+    if (!selectedInstance || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api!.setSubagentProtocol(selectedInstance.id, protocol);
+      await refreshSnapshot();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -2179,6 +2252,29 @@ function SettingsSurface({
             disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
             onChange={(checked) => void setSkillAttachments(checked)}
           />
+        </SettingRow>
+        <SettingRow
+          body={copy.subagentProtocolBody}
+          label={`${copy.subagentProtocol} (${selectedInstance?.name ?? "Selected"})`}
+        >
+          <div aria-label={copy.subagentProtocol} className="subagent-toggle-group" role="group">
+            <button
+              className={`subagent-toggle-btn ${selectedInstance?.subagentProtocol === "native" ? "is-active" : ""}`}
+              disabled={busy || selectedInstance?.subagentProtocol === "native"}
+              onClick={() => void switchSubagentProtocol("native")}
+              type="button"
+            >
+              {copy.subagentProtocolNative}
+            </button>
+            <button
+              className={`subagent-toggle-btn ${selectedInstance?.subagentProtocol !== "native" ? "is-active is-compat" : ""}`}
+              disabled={busy || selectedInstance?.subagentProtocol === "compatibility-v1"}
+              onClick={() => void switchSubagentProtocol("compatibility-v1")}
+              type="button"
+            >
+              {copy.subagentProtocolCompatibilityV1}
+            </button>
+          </div>
         </SettingRow>
         <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />

@@ -146,11 +146,13 @@ function instanceSnapshots() {
   const registry = instanceRegistryStore?.read().instances ?? [];
   return registry.map((record) => {
     const managed = managedInstances.get(record.id);
+    const runtimeConfig = managed?.runtimeHost?.runtimeConfigSnapshot().config;
     return {
       ...record,
       initialized: managed?.initialized === true,
       browser: managed?.browserHost?.snapshot() ?? null,
       configured: managed?.runtimeHost?.runtimeConfigSnapshot().configured ?? false,
+      subagentProtocol: runtimeConfig?.subagentProtocol ?? "compatibility-v1",
       operation: managed?.currentOperation() ?? null,
       state: managed?.stateStore?.read() ?? null,
     };
@@ -707,6 +709,16 @@ function registerIpc({
   });
 
   handle("launcher:cockpit-pool-sync", async () => managerResult({ cockpit: await syncCockpitPool() }));
+
+  handle("launcher:instance-subagent-protocol", async (_event, instanceId, rawProtocol) => {
+    const protocol = rawProtocol === "native" ? "native" : "compatibility-v1";
+    const targetId = instanceId || managerStateStore.read().selectedInstanceId;
+    const managed = await ensureManagedInstance(targetId);
+    const result = await managed.setSubagentProtocol(protocol);
+    const cockpit = await syncCockpitPool();
+    publishInstancesChanged();
+    return managerResult({ protocol: result.protocol, cockpit });
+  });
 
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });

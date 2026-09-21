@@ -100,6 +100,7 @@ export interface InstanceSnapshot {
   createdAt: string;
   initialized: boolean;
   configured: boolean;
+  subagentProtocol?: "compatibility-v1" | "native";
   browser: BrowserState | null;
   operation: OperationState | null;
   state: LauncherState | null;
@@ -159,6 +160,7 @@ export interface LauncherApi {
   restartInstance(instanceId: string): Promise<InstanceManagerResult>;
   removeInstance(instanceId: string, options?: { removeData?: boolean }): Promise<InstanceManagerResult>;
   syncCockpitPool(): Promise<InstanceManagerResult>;
+  setSubagentProtocol(instanceId: string, protocol: "compatibility-v1" | "native"): Promise<InstanceManagerResult>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;

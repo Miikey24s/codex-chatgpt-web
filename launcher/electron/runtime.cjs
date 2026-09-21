@@ -1227,6 +1227,23 @@ class RuntimeHost {
     return { ...result, mode: current.mode, enabled: enabled === true };
   }
 
+  async setSubagentProtocol(protocol) {
+    if (protocol !== "compatibility-v1" && protocol !== "native") {
+      throw new Error("Subagent protocol must be compatibility-v1 or native");
+    }
+    const current = this.runtimeConfigSnapshot();
+    if (!current.configured) {
+      throw new Error("Initialize the runtime before changing subagent protocol");
+    }
+    const result = await this.run("subagents", ["subagents", protocol], {
+      embedded: true,
+      message: `Setting subagent protocol to ${protocol === "native" ? "Native V2" : "Compatibility V1"}`,
+      successMessage: `Subagent protocol set to ${protocol === "native" ? "Native V2" : "Compatibility V1"}`,
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+    });
+    return { protocol, stdout: result.stdout };
+  }
+
   async upgradeManagedRuntime() {
     this.assertProductionProfile("Managed Codex runtime upgrade");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);

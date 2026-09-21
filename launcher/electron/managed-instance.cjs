@@ -149,6 +149,7 @@ class ManagedInstance {
   }
 
   snapshot() {
+    const runtimeConfig = this.runtimeHost?.runtimeConfigSnapshot().config;
     return {
       id: this.instance.id,
       name: this.instance.name,
@@ -158,8 +159,18 @@ class ManagedInstance {
       browserPartition: this.instance.browserPartition,
       browser: this.browserHost?.snapshot() ?? null,
       configured: this.runtimeHost?.runtimeConfigSnapshot().configured ?? false,
+      subagentProtocol: runtimeConfig?.subagentProtocol ?? "compatibility-v1",
       operation: this.currentOperation(),
     };
+  }
+
+  async setSubagentProtocol(protocol) {
+    await this.initialize();
+    const result = await this.runtimeHost.setSubagentProtocol(protocol);
+    if (this.instance.enabled) {
+      await this.restartRuntime();
+    }
+    return result;
   }
 
   async startRuntime() {

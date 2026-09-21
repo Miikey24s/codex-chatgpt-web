@@ -256,7 +256,7 @@ export function syncCockpitProvidersPool(
     const next: CockpitProviderDocument[] = [];
 
     for (const provider of providers) {
-      let instance = desiredUrls.get(provider.baseUrl) ?? desiredIds.get(provider.id);
+      let instance = desiredIds.get(provider.id) ?? desiredUrls.get(provider.baseUrl);
       if (!instance && provider.name === "Codex Web GPT") {
         instance = instances.find(candidate => candidate.id === "primary");
       }
@@ -266,9 +266,13 @@ export function syncCockpitProvidersPool(
       }
       if (claimed.has(instance.id)) continue;
       claimed.add(instance.id);
-      const apiKeys = (provider.apiKeys ?? []).filter(item => typeof item.apiKey === "string" && item.apiKey.trim());
+      const expectedKey = defaultProviderApiKey(instance);
+      const apiKeys = (provider.apiKeys ?? []).filter(
+        item => typeof item.apiKey === "string" && item.apiKey.trim(),
+      );
       next.push({
         ...provider,
+        id: managedProviderId(instance.id),
         name: managedProviderName(instance),
         baseUrl: managedProviderUrl(instance),
         modelCatalog: ["chatgpt-web/high"],
@@ -276,7 +280,7 @@ export function syncCockpitProvidersPool(
         wireApi: "responses",
         supportsWebsockets: false,
         enableModePreference: "direct",
-        apiKeys: apiKeys.length > 0 ? apiKeys : [defaultProviderApiKey(instance)],
+        apiKeys: apiKeys.length > 0 ? apiKeys : [expectedKey],
       });
     }
 
@@ -419,17 +423,50 @@ export interface CockpitSyncResult {
   message: string;
 }
 
+function defaultInstanceRegistryPath(cockpitHome = getCockpitHome()): string {
+  if (process.env.CODEX_CHATGPT_WEB_INSTANCES_FILE) {
+    return process.env.CODEX_CHATGPT_WEB_INSTANCES_FILE;
+  }
+  if (process.env.ANTIGRAVITY_COCKPIT_HOME) {
+    return join(cockpitHome, "instances.json");
+  }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "Codex Web GPT", "instances.json");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "Codex Web GPT", "instances.json");
+  }
+  return join(homedir(), ".config", "Codex Web GPT", "instances.json");
+}
+
+function loadPersistedCockpitWebInstances(fallbackPort = 17841, cockpitHome = getCockpitHome()): CockpitWebInstance[] {
+  try {
+    const registryPath = defaultInstanceRegistryPath(cockpitHome);
+    if (existsSync(registryPath)) {
+      const data = JSON.parse(readFileSync(registryPath, "utf8")) as { instances?: CockpitWebInstance[] };
+      if (Array.isArray(data.instances) && data.instances.length > 0) {
+        return data.instances.filter(i => i.enabled !== false);
+      }
+    }
+  } catch {
+    // fallback below
+  }
+  return [{ id: "primary", name: "Primary", port: fallbackPort }];
+}
+
 /**
  * Canonical Cockpit integration policy. Electron must call this through the core
  * CLI instead of maintaining a second routing implementation.
  */
-export function syncCockpitIntegration(bridgePort = 17841): CockpitSyncResult {
-  return syncCockpitInstancePool([{ id: "primary", name: "Primary", port: bridgePort }]);
+export function syncCockpitIntegration(bridgePort = 17841, cockpitHome = getCockpitHome()): CockpitSyncResult {
+  const instances = loadPersistedCockpitWebInstances(bridgePort, cockpitHome);
+  return syncCockpitInstancePool(instances, cockpitHome);
 }
 
-export function syncCockpitInstancePool(instances: CockpitWebInstance[]): CockpitSyncResult {
-  const providerConfigured = syncCockpitProvidersPool(instances);
-  const routingIsolated = syncCockpitPoolRoutingRules(instances);
+export function syncCockpitInstancePool(instances: CockpitWebInstance[], cockpitHome = getCockpitHome()): CockpitSyncResult {
+  const providerConfigured = syncCockpitProvidersPool(instances, cockpitHome);
+  const routingIsolated = syncCockpitPoolRoutingRules(instances, cockpitHome);
   const catalogSynced = syncCockpitModelCatalog();
   const ok = providerConfigured && routingIsolated && catalogSynced;
   return {
