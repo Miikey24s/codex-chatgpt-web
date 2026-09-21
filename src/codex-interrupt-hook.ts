@@ -233,3 +233,22 @@ export function verifyCodexInterruptHookRestored(text: string): void {
     throw new Error("Codex interrupt lifecycle hook is present while the bridge is disconnected");
   }
 }
+
+export function stripCodexInterruptHook(text: string): string {
+  let result = text;
+  while (true) {
+    const startMarker = result.indexOf(MANAGED_INTERRUPT_HOOK_START);
+    const endMarker = result.indexOf(MANAGED_INTERRUPT_HOOK_END);
+    if (startMarker < 0 || endMarker < 0 || endMarker < startMarker) break;
+    const afterEnd = endMarker + MANAGED_INTERRUPT_HOOK_END.length;
+    const trailingMatch = /^(?:\r\n|\n|\r)/.exec(result.slice(afterEnd));
+    const end = afterEnd + (trailingMatch ? trailingMatch[0].length : 0);
+    let start = startMarker;
+    while (start > 0 && (result[start - 1] === "\n" || result[start - 1] === "\r")) {
+      start--;
+    }
+    result = result.slice(0, start) + result.slice(end);
+  }
+  return result;
+}
+

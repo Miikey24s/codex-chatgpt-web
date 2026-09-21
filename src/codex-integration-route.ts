@@ -26,6 +26,7 @@ import type {
 } from "./codex-integration-shared";
 import {
   restoreCodexInterruptHook,
+  stripCodexInterruptHook,
   verifyCodexInterruptHook,
   verifyCodexInterruptHookRestored,
 } from "./codex-interrupt-hook";
@@ -156,9 +157,10 @@ function cockpitGatewayRouteManaged(journal: ManagedRouteJournal): journal is Co
 
 function restoreCockpitOwnedState(text: string, journal: ManagedRouteJournal): string {
   const withoutHook = journal.version === 10
-    ? restoreCodexInterruptHook(text, journal.interruptHook)
+    ? restoreCodexInterruptHook(text, journal.interruptHook, { allowAbsent: true })
     : text;
-  const restored = restoreOwnedManagedFeatures(withoutHook, journal);
+  const stripped = stripCodexInterruptHook(withoutHook);
+  const restored = restoreOwnedManagedFeatures(stripped, journal);
   const document = parseDocument(restored);
   removeManagedComment(document);
   if (cockpitGatewayRouteManaged(journal)) {
@@ -238,7 +240,7 @@ export function replacementBaseline(
     const withoutHook = journal.version === 10
       ? restoreCodexInterruptHook(currentText, journal.interruptHook, { allowAbsent: true })
       : currentText;
-    const baseline = restoreOwnedManagedFeatures(withoutHook, journal);
+    const baseline = restoreOwnedManagedFeatures(stripCodexInterruptHook(withoutHook), journal);
     const document = parseDocument(baseline);
     removeManagedComment(document);
     for (const [key, installedValue, previous] of [

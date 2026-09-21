@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppConfig, IntegrationOwner } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
-import { codexInterruptHookCommand, installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import { codexInterruptHookCommand, installCodexInterruptHook, installCodexInterruptHookCommand, stripCodexInterruptHook } from "./codex-interrupt-hook";
 import { syncCockpitIntegration } from "./cockpit";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
@@ -275,6 +275,8 @@ export function preflightCodexIntegration(
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
     }
     baseline = restoreLegacyV2(currentText, existing);
+  } else if (options.replaceExistingRoute === true) {
+    baseline = stripCodexInterruptHook(baseline);
   }
   installConfiguredIntegration(
     baseline,
@@ -369,6 +371,8 @@ export function installCodexIntegration(
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
     }
     baseline = restoreLegacyV2(currentText, existing);
+  } else if (options.replaceExistingRoute === true) {
+    baseline = stripCodexInterruptHook(baseline);
   }
   const patched = installConfiguredIntegration(
     baseline,

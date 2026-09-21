@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { AppConfig, IntegrationOwner, SubagentProtocol } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
@@ -257,13 +257,37 @@ export function getCodexModelsCachePath(): string {
   return join(getCodexHome(), "models_cache.json");
 }
 
+export function rootConfigDir(): string {
+  const current = getConfigDir();
+  const parent = dirname(current);
+  if (basename(parent) === "instances") {
+    return dirname(parent);
+  }
+  return current;
+}
+
 export function getCodexJournalPath(): string {
-  return join(getConfigDir(), "codex", "integration-journal.json");
+  const local = join(getConfigDir(), "codex", "integration-journal.json");
+  if (existsSync(local)) return local;
+  const root = rootConfigDir();
+  if (root !== getConfigDir()) {
+    const rootPath = join(root, "codex", "integration-journal.json");
+    if (existsSync(rootPath)) return rootPath;
+  }
+  return local;
 }
 
 export function getCodexJournalRecoveryPath(): string {
-  return join(getConfigDir(), "codex", "integration-journal.recovery.json");
+  const local = join(getConfigDir(), "codex", "integration-journal.recovery.json");
+  if (existsSync(local)) return local;
+  const root = rootConfigDir();
+  if (root !== getConfigDir()) {
+    const rootPath = join(root, "codex", "integration-journal.recovery.json");
+    if (existsSync(rootPath)) return rootPath;
+  }
+  return local;
 }
+
 
 export function routeUrl(config: AppConfig): string {
   return `http://${config.host}:${config.port}/v1`;
@@ -357,9 +381,17 @@ export function writeIntegrationState(
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.
-  writeFilesWithCompensation([
+  const writes = [
     { path: getCodexJournalRecoveryPath(), data },
     ...(configWrite ? [{ ...configWrite, followSymlink: true }] : []),
     { path: getCodexJournalPath(), data },
-  ], removals);
+  ];
+  const root = rootConfigDir();
+  if (root !== getConfigDir()) {
+    writes.push(
+      { path: join(root, "codex", "integration-journal.recovery.json"), data },
+      { path: join(root, "codex", "integration-journal.json"), data },
+    );
+  }
+  writeFilesWithCompensation(writes, removals);
 }
