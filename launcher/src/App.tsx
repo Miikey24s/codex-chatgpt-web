@@ -436,7 +436,7 @@ function LauncherShell({
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [browserSlot, browserSurfaceActive, setError]);
+  }, [browserSlot, browserSurfaceActive, setError, snapshot?.selectedInstanceId]);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
@@ -632,8 +632,35 @@ function LauncherShell({
               <span>Instances</span>
             </button>
             <div className="surface-instance-meta">
-              <strong>{selectedInstance.name}</strong>
-              <code>:{selectedInstance.port}</code>
+              {snapshot.instances.length > 1 ? (
+                <select
+                  aria-label="Switch active instance"
+                  className="surface-instance-select"
+                  onChange={async (e) => {
+                    const targetId = e.target.value;
+                    if (targetId && targetId !== selectedInstance.id) {
+                      try {
+                        await api!.selectInstance(targetId);
+                        await refreshSnapshot();
+                      } catch (cause) {
+                        setError(messageOf(cause));
+                      }
+                    }
+                  }}
+                  value={selectedInstance.id}
+                >
+                  {snapshot.instances.map(inst => (
+                    <option key={inst.id} value={inst.id}>
+                      {inst.name} (Port {inst.port}) {inst.enabled ? "• Active" : "• Offline"}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <>
+                  <strong>{selectedInstance.name}</strong>
+                  <code>:{selectedInstance.port}</code>
+                </>
+              )}
               <span className={`cockpit-badge is-${selectedInstance.enabled ? "enabled" : "disabled"}`}>
                 <StateDot state={selectedInstance.enabled ? "ready" : "idle"} />
                 {selectedInstance.enabled ? "Cockpit Enabled" : "Cockpit Disabled"}
@@ -917,7 +944,16 @@ function InstancesSurface({
       <div className="instance-table-wrap">
         <table className="instance-table">
           <thead>
-            <tr><th>Status</th><th>Name</th><th>Account</th><th>Endpoint</th><th>Health</th><th>Cockpit</th><th>Actions</th></tr>
+            <tr>
+              <th className="instance-th-select">Select</th>
+              <th>Status</th>
+              <th>Name</th>
+              <th>Account</th>
+              <th>Endpoint</th>
+              <th>Health</th>
+              <th>Cockpit</th>
+              <th>Actions</th>
+            </tr>
           </thead>
           <tbody>
             {snapshot.instances.map((instance) => {
@@ -931,9 +967,34 @@ function InstancesSurface({
                     : "ready";
               const signedIn = instance.browser?.authenticated === true;
               return (
-                <tr className={active ? "is-selected" : ""} key={instance.id}>
+                <tr
+                  className={`instance-row ${active ? "is-selected" : ""}`}
+                  key={instance.id}
+                  onClick={() => void select(instance)}
+                  title={active ? `${instance.name} is currently selected` : `Click to select ${instance.name}`}
+                >
+                  <td className="instance-select-cell">
+                    <span
+                      aria-checked={active}
+                      aria-label={active ? "Currently selected" : "Click to select"}
+                      className={`instance-radio-indicator ${active ? "is-selected" : ""}`}
+                      role="radio"
+                    />
+                  </td>
                   <td><span className={`instance-status is-${status}`}><StateDot state={status === "error" ? "error" : status === "busy" ? "busy" : status === "ready" ? "ready" : "idle"} />{status}</span></td>
-                  <td><button className="instance-name-button" disabled={actionBusy} onClick={() => void select(instance)} type="button">{instance.name}</button></td>
+                  <td>
+                    <button
+                      className="instance-name-button"
+                      disabled={actionBusy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void select(instance);
+                      }}
+                      type="button"
+                    >
+                      {instance.name}
+                    </button>
+                  </td>
                   <td>{signedIn ? "Signed in" : "Signed out"}</td>
                   <td><code>:{instance.port}</code></td>
                   <td>{instance.configured ? (instance.initialized ? "Ready" : "Configured") : "Setup needed"}</td>
@@ -945,11 +1006,30 @@ function InstancesSurface({
                   </td>
                   <td>
                     <div className="instance-row-actions">
+                      {!active ? (
+                        <button
+                          className="table-action-button is-select"
+                          disabled={actionBusy}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void select(instance);
+                          }}
+                          title="Select this instance"
+                          type="button"
+                        >
+                          Select
+                        </button>
+                      ) : (
+                        <span className="instance-selected-tag">Selected</span>
+                      )}
                       {instance.enabled && instance.id !== "primary" ? (
                         <button
                           className="table-action-button"
                           disabled={actionBusy}
-                          onClick={() => void run(instance.id, () => api!.stopInstance(instance.id))}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void run(instance.id, () => api!.stopInstance(instance.id));
+                          }}
                           title="Disable and stop instance"
                           type="button"
                         >
@@ -959,7 +1039,10 @@ function InstancesSurface({
                         <button
                           className="table-action-button is-primary"
                           disabled={actionBusy || !instance.configured}
-                          onClick={() => void run(instance.id, () => api!.startInstance(instance.id))}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void run(instance.id, () => api!.startInstance(instance.id));
+                          }}
                           title={!instance.configured ? "Complete setup before starting" : "Start and enable instance"}
                           type="button"
                         >
@@ -970,7 +1053,10 @@ function InstancesSurface({
                         <button
                           className="table-action-button is-danger"
                           disabled={actionBusy}
-                          onClick={() => void remove(instance)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void remove(instance);
+                          }}
                           title="Delete instance"
                           type="button"
                         >
@@ -990,7 +1076,26 @@ function InstancesSurface({
         <section className="instance-detail">
           <header>
             <div className="instance-detail-info">
-              <span className="instance-detail-kicker">Selected instance</span>
+              <div className="instance-detail-kicker-row">
+                <span className="instance-detail-kicker">Selected instance</span>
+                {snapshot.instances.length > 1 ? (
+                  <select
+                    aria-label="Switch selected instance"
+                    className="instance-kicker-select"
+                    onChange={(e) => {
+                      const target = snapshot.instances.find(i => i.id === e.target.value);
+                      if (target) void select(target);
+                    }}
+                    value={selected.id}
+                  >
+                    {snapshot.instances.map(inst => (
+                      <option key={inst.id} value={inst.id}>
+                        Switch to: {inst.name} (Port {inst.port}) {inst.id === selected.id ? "✓" : ""}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
               <div className="instance-detail-title-row">
                 <h2>{selected.name}</h2>
                 <span className={`cockpit-badge is-${selected.enabled ? "enabled" : "disabled"}`}>

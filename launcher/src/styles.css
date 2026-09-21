@@ -1068,30 +1068,79 @@ code {
   font-weight: 500;
 }
 
-.instance-table th:first-child,
-.instance-table td:first-child {
-  width: 88px;
+.instance-table th.instance-th-select,
+.instance-table td.instance-select-cell {
+  width: 44px;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.instance-table th:nth-child(2),
+.instance-table td:nth-child(2) {
+  width: 84px;
 }
 
 .instance-table th:nth-child(4),
 .instance-table td:nth-child(4) {
-  width: 96px;
+  width: 92px;
 }
 
 .instance-table th:nth-child(5),
 .instance-table td:nth-child(5) {
-  width: 100px;
+  width: 80px;
 }
 
 .instance-table th:nth-child(6),
 .instance-table td:nth-child(6) {
-  width: 110px;
+  width: 100px;
 }
 
 .instance-table th:nth-child(7),
 .instance-table td:nth-child(7) {
-  width: 130px;
+  width: 110px;
+}
+
+.instance-table th:nth-child(8),
+.instance-table td:nth-child(8) {
+  width: 180px;
   text-align: right;
+}
+
+.instance-row {
+  cursor: pointer;
+  transition: background var(--duration-micro) ease;
+}
+
+.instance-row:hover td {
+  background: var(--color-background-control-hover);
+}
+
+.instance-row.is-selected td {
+  background: rgb(59 130 246 / 14%);
+}
+
+.instance-row.is-selected td:first-child {
+  box-shadow: inset 3px 0 0 #3b82f6;
+}
+
+.instance-radio-indicator {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border-heavy);
+  box-sizing: border-box;
+  vertical-align: middle;
+  transition: all 0.15s ease;
+}
+
+.instance-row:hover .instance-radio-indicator {
+  border-color: #60a5fa;
+}
+
+.instance-radio-indicator.is-selected {
+  border-color: #3b82f6;
+  background: radial-gradient(circle, #3b82f6 45%, transparent 50%);
 }
 
 .cockpit-badge {
@@ -1123,6 +1172,17 @@ code {
   gap: 6px;
 }
 
+.instance-active-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: rgb(59 130 246 / 20%);
+  color: #60a5fa;
+  font-weight: 550;
+}
+
 .table-action-button {
   padding: 3px 8px;
   border: 1px solid var(--color-border);
@@ -1137,6 +1197,18 @@ code {
 .table-action-button:hover:not(:disabled) {
   background: var(--color-background-control-hover);
   border-color: var(--color-border-hover);
+}
+
+.table-action-button.is-select {
+  background: var(--color-background-control);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.table-action-button.is-select:hover:not(:disabled) {
+  background: rgb(59 130 246 / 18%);
+  border-color: #3b82f6;
+  color: #60a5fa;
 }
 
 .table-action-button.is-primary {
@@ -1180,10 +1252,6 @@ code {
   color: #f87171;
 }
 
-.instance-table tr.is-selected td {
-  background: var(--color-background-control-hover);
-}
-
 .instance-name-button {
   max-width: 100%;
   padding: 3px 0;
@@ -1194,6 +1262,45 @@ code {
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.instance-name-button:hover {
+  color: #60a5fa;
+  text-decoration: underline;
+}
+
+.instance-detail-kicker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.instance-kicker-select,
+.surface-instance-select {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.instance-kicker-select:hover,
+.surface-instance-select:hover {
+  border-color: #3b82f6;
+}
+
+.surface-instance-select {
+  height: 26px;
+  font-weight: 600;
+  border-color: var(--color-border);
+  background: var(--color-background-elevated);
 }
 
 .instance-status {
