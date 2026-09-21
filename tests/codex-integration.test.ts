@@ -25,8 +25,10 @@ import {
   MANAGED_MULTI_AGENT_V2_LINE,
   MANAGED_ROUTE_COMMENT,
   managedAgentMaxDepthLine,
+  rootConfigDir,
   restoreFileSnapshot,
   snapshotFile,
+  writeIntegrationState,
   writeFilesWithCompensation,
 } from "../src/codex-integration-shared";
 
@@ -132,6 +134,45 @@ describe("reversible native Codex route integration", () => {
   test("expands a configured tilde Codex home consistently with launcher paths", () => {
     process.env.CODEX_HOME = "~/custom-codex-home";
     expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
+  });
+
+  test("secondary sibling homes read the root journal but write both local and root journals", () => {
+    const root = join(tmpdir(), `codex-chatgpt-web-multi-instance-${process.pid}-${Date.now()}-${Math.random()}`);
+    roots.push(root);
+    const primaryHome = join(root, ".codex-chatgpt-web");
+    const secondaryHome = join(root, ".codex-chatgpt-web-instances", "instance-2");
+    const rootJournalPath = join(primaryHome, "codex", "integration-journal.json");
+    const rootRecoveryPath = join(primaryHome, "codex", "integration-journal.recovery.json");
+    const localJournalPath = join(secondaryHome, "codex", "integration-journal.json");
+    const localRecoveryPath = join(secondaryHome, "codex", "integration-journal.recovery.json");
+    mkdirSync(join(primaryHome, "codex"), { recursive: true });
+    writeFileSync(rootJournalPath, "stale root journal\n");
+    writeFileSync(rootRecoveryPath, "stale root recovery\n");
+    process.env.CODEX_CHATGPT_WEB_HOME = secondaryHome;
+
+    expect(rootConfigDir()).toBe(primaryHome);
+    expect(getCodexJournalPath()).toBe(rootJournalPath);
+    expect(getCodexJournalRecoveryPath()).toBe(rootRecoveryPath);
+
+    const journal = {
+      version: 3 as const,
+      configPath: join(root, "codex-home", "config.toml"),
+      installed: { openai_base_url: "http://127.0.0.1:17842/v1" },
+      previous: {
+        openai_base_url: { present: false },
+        model_provider: { present: false },
+        model_catalog_json: { present: false },
+      },
+    };
+    writeIntegrationState(journal);
+
+    const expected = `${JSON.stringify(journal, null, 2)}\n`;
+    expect(readFileSync(localJournalPath, "utf8")).toBe(expected);
+    expect(readFileSync(localRecoveryPath, "utf8")).toBe(expected);
+    expect(readFileSync(rootJournalPath, "utf8")).toBe(expected);
+    expect(readFileSync(rootRecoveryPath, "utf8")).toBe(expected);
+    expect(getCodexJournalPath()).toBe(localJournalPath);
+    expect(getCodexJournalRecoveryPath()).toBe(localRecoveryPath);
   });
 
   test("reads an explicit native context override without requiring a selected model", () => {

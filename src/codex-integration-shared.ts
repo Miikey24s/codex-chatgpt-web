@@ -260,8 +260,13 @@ export function getCodexModelsCachePath(): string {
 export function rootConfigDir(): string {
   const current = getConfigDir();
   const parent = dirname(current);
-  if (basename(parent) === "instances") {
+  const parentName = basename(parent);
+  if (parentName === "instances") {
     return dirname(parent);
+  }
+  const managedInstancesSuffix = "-instances";
+  if (parentName.endsWith(managedInstancesSuffix) && parentName.length > managedInstancesSuffix.length) {
+    return join(dirname(parent), parentName.slice(0, -managedInstancesSuffix.length));
   }
   return current;
 }
@@ -379,15 +384,18 @@ export function writeIntegrationState(
   removals: string[] = [],
 ): void {
   const data = serializeJournal(journal);
+  const current = getConfigDir();
+  const localRecoveryPath = join(current, "codex", "integration-journal.recovery.json");
+  const localJournalPath = join(current, "codex", "integration-journal.json");
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.
   const writes = [
-    { path: getCodexJournalRecoveryPath(), data },
+    { path: localRecoveryPath, data },
     ...(configWrite ? [{ ...configWrite, followSymlink: true }] : []),
-    { path: getCodexJournalPath(), data },
+    { path: localJournalPath, data },
   ];
   const root = rootConfigDir();
-  if (root !== getConfigDir()) {
+  if (root !== current) {
     writes.push(
       { path: join(root, "codex", "integration-journal.recovery.json"), data },
       { path: join(root, "codex", "integration-journal.json"), data },
