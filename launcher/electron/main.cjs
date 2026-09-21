@@ -30,6 +30,7 @@ const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
+const { PRIMARY_INSTANCE_ID, createInstanceRegistryStore } = require("./instance-registry.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const {
@@ -1015,6 +1016,12 @@ async function start() {
   await app.whenReady();
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const instanceRegistry = createInstanceRegistryStore(path.join(app.getPath("userData"), "instances.json"), {
+    primaryProfile: LAUNCHER_PROFILE,
+  });
+  if (!instanceRegistry.has(stateStore.read().selectedInstanceId)) {
+    stateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
+  }
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -1042,6 +1049,10 @@ async function start() {
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
+  });
+  logger.info("instance_registry.ready", {
+    count: instanceRegistry.read().instances.length,
+    selectedInstanceId: stateStore.read().selectedInstanceId,
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";

@@ -20,6 +20,7 @@ const DEFAULT_STATE = Object.freeze({
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
+  selectedInstanceId: "primary",
   sidebarOpen: true,
   sidebarWidth: 252,
   mcpGuideStep: 0,
@@ -65,6 +66,9 @@ function readState(filePath) {
     if (state.browserSmokeVersion !== null
       && (typeof state.browserSmokeVersion !== "string" || state.browserSmokeVersion.length > 128)) {
       state.browserSmokeVersion = DEFAULT_STATE.browserSmokeVersion;
+    }
+    if (typeof state.selectedInstanceId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(state.selectedInstanceId)) {
+      state.selectedInstanceId = DEFAULT_STATE.selectedInstanceId;
     }
     if (!Number.isFinite(state.sidebarWidth)
       || state.sidebarWidth < SIDEBAR_MIN_WIDTH
