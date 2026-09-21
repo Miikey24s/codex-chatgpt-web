@@ -253,6 +253,7 @@ export function syncCockpitProvidersPool(
     const desiredUrls = new Map(instances.map(instance => [managedProviderUrl(instance), instance]));
     const desiredIds = new Map(instances.map(instance => [managedProviderId(instance.id), instance]));
     const claimed = new Set<string>();
+    const claimedApiKeys = new Set<string>();
     const next: CockpitProviderDocument[] = [];
 
     for (const provider of providers) {
@@ -268,8 +269,11 @@ export function syncCockpitProvidersPool(
       claimed.add(instance.id);
       const expectedKey = defaultProviderApiKey(instance);
       const apiKeys = (provider.apiKeys ?? []).filter(
-        item => typeof item.apiKey === "string" && item.apiKey.trim(),
+        item => typeof item.apiKey === "string" && item.apiKey.trim() && !claimedApiKeys.has(item.apiKey.trim()),
       );
+      for (const item of apiKeys) claimedApiKeys.add(item.apiKey.trim());
+      const effectiveKeys = apiKeys.length > 0 ? apiKeys : [expectedKey];
+      if (apiKeys.length === 0) claimedApiKeys.add(expectedKey.apiKey);
       next.push({
         ...provider,
         id: managedProviderId(instance.id),
@@ -280,7 +284,7 @@ export function syncCockpitProvidersPool(
         wireApi: "responses",
         supportsWebsockets: false,
         enableModePreference: "direct",
-        apiKeys: apiKeys.length > 0 ? apiKeys : [expectedKey],
+        apiKeys: effectiveKeys,
       });
     }
 
