@@ -3,13 +3,134 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { syncCockpitIntegration, syncCockpitRoutingRules } from "../src/cockpit";
+import {
+  syncCockpitIntegration,
+  syncCockpitPoolRoutingRules,
+  syncCockpitProvidersPool,
+  syncCockpitRoutingRules,
+} from "../src/cockpit";
 
 function accountId(apiKey: string): string {
   return `codex_apikey_${createHash("md5").update(apiKey).digest("hex")}`;
 }
 
 describe("Cockpit model routing", () => {
+  test("syncs an enabled Web GPT pool without touching unrelated providers", () => {
+    const home = mkdtempSync(join(tmpdir(), "codex-web-cockpit-pool-"));
+    try {
+      writeFileSync(join(home, "codex_model_providers.json"), JSON.stringify([
+        {
+          id: "cmp_native_custom",
+          name: "Custom Responses Provider",
+          baseUrl: "http://127.0.0.1:18000/v1",
+          modelCatalog: ["custom/model"],
+          apiKeys: [{ id: "native-key", name: "Native", apiKey: "native-secret" }],
+        },
+        {
+          id: "cmp_webgpt_primary",
+          name: "Codex Web GPT",
+          baseUrl: "http://127.0.0.1:17841/v1",
+          modelCatalog: ["chatgpt-web/high"],
+          apiKeys: [{ id: "primary-key", name: "Primary", apiKey: "primary-secret" }],
+        },
+        {
+          id: "cmp_webgpt_stale",
+          name: "Codex Web GPT · Stale",
+          baseUrl: "http://127.0.0.1:17999/v1",
+          modelCatalog: ["chatgpt-web/high"],
+          apiKeys: [{ id: "stale-key", name: "Stale", apiKey: "stale-secret" }],
+        },
+      ]));
+
+      expect(syncCockpitProvidersPool([
+        { id: "primary", name: "Primary", port: 17841 },
+        { id: "instance-2", name: "Work 2", port: 17842 },
+        { id: "instance-3", name: "Work 3", port: 17843, enabled: false },
+      ], home)).toBe(true);
+
+      const providers = JSON.parse(readFileSync(join(home, "codex_model_providers.json"), "utf8"));
+      expect(providers).toHaveLength(3);
+      expect(providers[0]).toEqual({
+        id: "cmp_native_custom",
+        name: "Custom Responses Provider",
+        baseUrl: "http://127.0.0.1:18000/v1",
+        modelCatalog: ["custom/model"],
+        apiKeys: [{ id: "native-key", name: "Native", apiKey: "native-secret" }],
+      });
+      expect(providers[1].name).toBe("Codex Web GPT");
+      expect(providers[1].baseUrl).toBe("http://127.0.0.1:17841/v1");
+      expect(providers[1].apiKeys).toEqual([{ id: "primary-key", name: "Primary", apiKey: "primary-secret" }]);
+      expect(providers[2]).toMatchObject({
+        id: "cmp_webgpt_instance_2",
+        name: "Codex Web GPT · Work 2",
+        baseUrl: "http://127.0.0.1:17842/v1",
+        modelCatalog: ["chatgpt-web/high"],
+        wireApi: "responses",
+      });
+      expect(providers[2].apiKeys).toEqual([{
+        id: "cmk_webgpt_instance_2",
+        name: "Work 2",
+        apiKey: "local-webgpt-instance-2",
+      }]);
+      expect(providers.some((provider: { baseUrl?: string }) => provider.baseUrl?.includes("17843"))).toBe(false);
+      expect(providers.some((provider: { baseUrl?: string }) => provider.baseUrl?.includes("17999"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("routes every active Web GPT pool account and fails closed until all are active", () => {
+    const home = mkdtempSync(join(tmpdir(), "codex-web-cockpit-pool-routing-"));
+    try {
+      const primary = accountId("primary-secret");
+      const work2 = accountId("work2-secret");
+      writeFileSync(join(home, "codex_model_providers.json"), JSON.stringify([
+        {
+          id: "cmp_webgpt_primary",
+          name: "Codex Web GPT",
+          baseUrl: "http://127.0.0.1:17841/v1",
+          modelCatalog: ["chatgpt-web/high"],
+          apiKeys: [{ apiKey: "primary-secret" }],
+        },
+        {
+          id: "cmp_webgpt_instance_2",
+          name: "Codex Web GPT · Work 2",
+          baseUrl: "http://127.0.0.1:17842/v1",
+          modelCatalog: ["chatgpt-web/high"],
+          apiKeys: [{ apiKey: "work2-secret" }],
+        },
+      ]));
+      writeFileSync(join(home, "codex_local_access.json"), JSON.stringify({
+        accountIds: ["oauth-a", primary],
+        accountModelRules: [],
+      }));
+
+      const pool = [
+        { id: "primary", name: "Primary", port: 17841 },
+        { id: "instance-2", name: "Work 2", port: 17842 },
+      ];
+      expect(syncCockpitPoolRoutingRules(pool, home)).toBe(false);
+
+      writeFileSync(join(home, "codex_local_access.json"), JSON.stringify({
+        accountIds: ["oauth-a", primary, work2],
+        accountModelRules: [
+          { accountId: "oauth-a", excludedModels: ["native-custom"] },
+          { accountId: work2, excludedModels: ["web-custom"] },
+        ],
+      }));
+      expect(syncCockpitPoolRoutingRules(pool, home)).toBe(true);
+
+      const config = JSON.parse(readFileSync(join(home, "codex_local_access.json"), "utf8"));
+      expect(config.accountModelRules).toEqual([
+        { accountId: "oauth-a", excludedModels: ["native-custom", "chatgpt-web/*"] },
+        { accountId: primary, excludedModels: ["gpt-*", "codex-*"] },
+        { accountId: work2, excludedModels: ["web-custom", "gpt-*", "codex-*"] },
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("keeps OAuth and Codex Web GPT model families isolated and cleans legacy Aurora exclusions", () => {
     const home = mkdtempSync(join(tmpdir(), "codex-web-cockpit-"));
     try {

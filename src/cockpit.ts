@@ -163,59 +163,148 @@ export function syncCockpitModelCatalog(): boolean {
   }
 }
 
-export function syncCockpitProvidersFile(bridgePort = 17841, cockpitHome = getCockpitHome()): boolean {
+export interface CockpitWebInstance {
+  id: string;
+  name: string;
+  port: number;
+  enabled?: boolean;
+}
+
+interface CockpitProviderApiKey {
+  id: string;
+  name: string;
+  apiKey: string;
+}
+
+interface CockpitProviderDocument {
+  id: string;
+  name: string;
+  baseUrl: string;
+  modelCatalog: string[];
+  supportsVision?: boolean;
+  wireApi?: string;
+  supportsWebsockets?: boolean;
+  enableModePreference?: string;
+  apiKeys?: CockpitProviderApiKey[];
+}
+
+const MANAGED_PROVIDER_ID_PREFIX = "cmp_webgpt_";
+const MANAGED_PROVIDER_NAME_PREFIX = "Codex Web GPT · ";
+
+function validateCockpitWebInstances(instances: CockpitWebInstance[]): CockpitWebInstance[] {
+  const enabled = instances.filter(instance => instance.enabled !== false).map(instance => ({ ...instance }));
+  const ids = new Set<string>();
+  const ports = new Set<number>();
+  for (const instance of enabled) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(instance.id)) throw new Error(`Invalid Web GPT instance id: ${instance.id}`);
+    if (typeof instance.name !== "string" || !instance.name.trim() || instance.name.length > 80) {
+      throw new Error(`Invalid Web GPT instance name: ${instance.id}`);
+    }
+    if (!Number.isSafeInteger(instance.port) || instance.port < 1 || instance.port > 65_535) {
+      throw new Error(`Invalid Web GPT instance port: ${instance.id}`);
+    }
+    if (ids.has(instance.id)) throw new Error(`Duplicate Web GPT instance id: ${instance.id}`);
+    if (ports.has(instance.port)) throw new Error(`Duplicate Web GPT instance port: ${instance.port}`);
+    ids.add(instance.id);
+    ports.add(instance.port);
+  }
+  return enabled;
+}
+
+function managedProviderId(instanceId: string): string {
+  return `${MANAGED_PROVIDER_ID_PREFIX}${instanceId.replace(/-/g, "_")}`;
+}
+
+function managedProviderName(instance: CockpitWebInstance): string {
+  return instance.id === "primary" ? "Codex Web GPT" : `${MANAGED_PROVIDER_NAME_PREFIX}${instance.name.trim()}`;
+}
+
+function managedProviderUrl(instance: CockpitWebInstance): string {
+  return `http://127.0.0.1:${instance.port}/v1`;
+}
+
+function defaultProviderApiKey(instance: CockpitWebInstance): CockpitProviderApiKey {
+  const suffix = instance.id.replace(/[^a-z0-9-]/g, "-");
+  return {
+    id: `cmk_webgpt_${suffix.replace(/-/g, "_")}`,
+    name: instance.id === "primary" ? "Local Bridge" : instance.name.trim(),
+    apiKey: instance.id === "primary" ? "local" : `local-webgpt-${suffix}`,
+  };
+}
+
+function isManagedPoolProvider(provider: CockpitProviderDocument): boolean {
+  return provider.id?.startsWith(MANAGED_PROVIDER_ID_PREFIX)
+    || provider.name === "Codex Web GPT"
+    || provider.name?.startsWith(MANAGED_PROVIDER_NAME_PREFIX);
+}
+
+export function syncCockpitProvidersPool(
+  rawInstances: CockpitWebInstance[],
+  cockpitHome = getCockpitHome(),
+): boolean {
   const providersFile = join(cockpitHome, "codex_model_providers.json");
   if (!existsSync(providersFile)) return false;
 
   try {
-    const providers = JSON.parse(readFileSync(providersFile, "utf8")) as Array<{
-      id: string;
-      name: string;
-      baseUrl: string;
-      modelCatalog: string[];
-      supportsVision?: boolean;
-      wireApi?: string;
-      supportsWebsockets?: boolean;
-      enableModePreference?: string;
-      apiKeys?: Array<{ id: string; name: string; apiKey: string }>;
-    }>;
+    const original = readFileSync(providersFile, "utf8");
+    const providers = JSON.parse(original) as CockpitProviderDocument[];
+    if (!Array.isArray(providers)) return false;
+    const instances = validateCockpitWebInstances(rawInstances);
+    const desiredUrls = new Map(instances.map(instance => [managedProviderUrl(instance), instance]));
+    const desiredIds = new Map(instances.map(instance => [managedProviderId(instance.id), instance]));
+    const claimed = new Set<string>();
+    const next: CockpitProviderDocument[] = [];
 
-    const expectedUrl = `http://127.0.0.1:${bridgePort}/v1`;
-    let found = false;
     for (const provider of providers) {
-      if (provider.name === "Codex Web GPT" || provider.baseUrl === expectedUrl) {
-        found = true;
-        provider.baseUrl = expectedUrl;
-        provider.modelCatalog = ["chatgpt-web/high"];
-        break;
+      let instance = desiredUrls.get(provider.baseUrl) ?? desiredIds.get(provider.id);
+      if (!instance && provider.name === "Codex Web GPT") {
+        instance = instances.find(candidate => candidate.id === "primary");
       }
-    }
-
-    if (!found) {
-      providers.push({
-        id: `cmp_${Date.now()}_cockpit_web_gpt`,
-        name: "Codex Web GPT",
-        baseUrl: expectedUrl,
+      if (!instance) {
+        if (!isManagedPoolProvider(provider)) next.push(provider);
+        continue;
+      }
+      if (claimed.has(instance.id)) continue;
+      claimed.add(instance.id);
+      const apiKeys = (provider.apiKeys ?? []).filter(item => typeof item.apiKey === "string" && item.apiKey.trim());
+      next.push({
+        ...provider,
+        name: managedProviderName(instance),
+        baseUrl: managedProviderUrl(instance),
         modelCatalog: ["chatgpt-web/high"],
         supportsVision: false,
         wireApi: "responses",
         supportsWebsockets: false,
         enableModePreference: "direct",
-        apiKeys: [
-          {
-            id: `cmk_${Date.now()}_1`,
-            name: "Local Bridge",
-            apiKey: "local",
-          },
-        ],
+        apiKeys: apiKeys.length > 0 ? apiKeys : [defaultProviderApiKey(instance)],
       });
     }
 
-    writeFileSync(providersFile, `${JSON.stringify(providers, null, 2)}\n`, "utf8");
+    for (const instance of instances) {
+      if (claimed.has(instance.id)) continue;
+      next.push({
+        id: managedProviderId(instance.id),
+        name: managedProviderName(instance),
+        baseUrl: managedProviderUrl(instance),
+        modelCatalog: [COCKPIT_WEB_MODEL],
+        supportsVision: false,
+        wireApi: "responses",
+        supportsWebsockets: false,
+        enableModePreference: "direct",
+        apiKeys: [defaultProviderApiKey(instance)],
+      });
+    }
+
+    const serialized = `${JSON.stringify(next, null, 2)}\n`;
+    if (serialized !== original) writeFileSync(providersFile, serialized, "utf8");
     return true;
   } catch {
     return false;
   }
+}
+
+export function syncCockpitProvidersFile(bridgePort = 17841, cockpitHome = getCockpitHome()): boolean {
+  return syncCockpitProvidersPool([{ id: "primary", name: "Primary", port: bridgePort }], cockpitHome);
 }
 
 interface CockpitAccountModelRule {
@@ -271,15 +360,23 @@ export function syncCockpitRoutingRules(
   bridgePort = 17841,
   cockpitHome = getCockpitHome(),
 ): boolean {
+  return syncCockpitPoolRoutingRules([{ id: "primary", name: "Primary", port: bridgePort }], cockpitHome);
+}
+
+export function syncCockpitPoolRoutingRules(
+  rawInstances: CockpitWebInstance[],
+  cockpitHome = getCockpitHome(),
+): boolean {
   const providersFile = join(cockpitHome, "codex_model_providers.json");
   const localAccessFile = join(cockpitHome, "codex_local_access.json");
   if (!existsSync(providersFile) || !existsSync(localAccessFile)) return false;
 
   try {
+    const instances = validateCockpitWebInstances(rawInstances);
+    const expectedUrls = new Set(instances.map(managedProviderUrl));
     const providers = JSON.parse(readFileSync(providersFile, "utf8")) as CockpitModelProvider[];
-    const expectedUrl = `http://127.0.0.1:${bridgePort}/v1`;
-    const webProvider = providers.find(item => item.name === "Codex Web GPT" || item.baseUrl === expectedUrl);
-    const webAccountIds = providerAccountIds(webProvider);
+    const webProviders = providers.filter(item => item.baseUrl && expectedUrls.has(item.baseUrl));
+    const webAccountIds = new Set(webProviders.flatMap(provider => [...providerAccountIds(provider)]));
     if (webAccountIds.size === 0) return false;
 
     const config = JSON.parse(readFileSync(localAccessFile, "utf8")) as CockpitLocalAccessConfig;
@@ -308,7 +405,7 @@ export function syncCockpitRoutingRules(
     if (next !== readFileSync(localAccessFile, "utf8")) {
       writeFileSync(localAccessFile, next, "utf8");
     }
-    return true;
+    return activeWebAccountIds.size === webAccountIds.size;
   } catch {
     return false;
   }
@@ -327,8 +424,12 @@ export interface CockpitSyncResult {
  * CLI instead of maintaining a second routing implementation.
  */
 export function syncCockpitIntegration(bridgePort = 17841): CockpitSyncResult {
-  const providerConfigured = syncCockpitProvidersFile(bridgePort);
-  const routingIsolated = syncCockpitRoutingRules(bridgePort);
+  return syncCockpitInstancePool([{ id: "primary", name: "Primary", port: bridgePort }]);
+}
+
+export function syncCockpitInstancePool(instances: CockpitWebInstance[]): CockpitSyncResult {
+  const providerConfigured = syncCockpitProvidersPool(instances);
+  const routingIsolated = syncCockpitPoolRoutingRules(instances);
   const catalogSynced = syncCockpitModelCatalog();
   const ok = providerConfigured && routingIsolated && catalogSynced;
   return {
