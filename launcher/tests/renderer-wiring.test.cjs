@@ -8,6 +8,7 @@ const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "ut
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
+const managedInstanceSource = fs.readFileSync(path.join(launcherRoot, "electron", "managed-instance.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
@@ -71,12 +72,9 @@ test("a foreground launch request survives hidden startup until the launcher win
 });
 
 test("normal shutdown persists the ChatGPT session before closing browser views", () => {
-  assert.match(
-    electronMain,
-    /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
-  );
-  const persist = electronMain.indexOf("await browserHost?.persistSession()");
-  const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
+  assert.match(electronMain, /for \(const managed of managedInstances\.values\(\)\)[\s\S]*?await managed\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
+  const persist = managedInstanceSource.indexOf("await this.browserHost?.persistSession()");
+  const destroy = managedInstanceSource.indexOf("this.browserHost?.destroy()", persist);
   assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
 });
@@ -126,8 +124,10 @@ test("startup failure stays visible on another launch and Retry exits the failed
   const sandbox = {
     mainWindow: window, mainWindowReadyToShow: false, mainWindowShowRequested: false,
     startupFailed: false, quitting: false,
-    browserHost: { destroy: () => events.push("destroy") },
-    browserControl: { close: async () => events.push("control closed") },
+    managedInstances: new Map([["primary", {
+      browserHost: { destroy: () => events.push("destroy") },
+      browserControl: { close: async () => events.push("control closed") },
+    }]]),
     start: async () => { throw new Error("Browser idle document did not commit within 10000ms"); },
     app: { getPath: () => "/unused", whenReady: async () => {},
       relaunch: options => events.push(["relaunch", options.args]), exit: code => events.push(["exit", code]) },
@@ -172,14 +172,14 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
   const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
-  const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
-  const browserReady = electronMain.indexOf("await browserHost.ready();", start);
+  const managedConstruction = electronMain.indexOf("new ManagedInstance({", start);
+  const browserReady = electronMain.indexOf("await primaryManagedInstance.initialize();", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
   for (const [surface, position] of [
     ["CDP port allocation", cdpPortAllocation],
     ["launcher window", windowCreation],
-    ["browser control server", controlServerStart],
+    ["managed browser/control construction", managedConstruction],
     ["embedded browser", browserReady],
   ]) {
     assert.ok(position > runtimeValidation, `${surface} must start only after runtime verification`);
@@ -189,7 +189,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
   assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
-  assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
+  assert.match(electronMain, /await managed\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
@@ -211,7 +211,7 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.capturePasskeyLogin\(\)/);
+  assert.match(managedInstanceSource, /loginWithPasskey: \(\) => this\.runtimeHost\.capturePasskeyLogin\(\)/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
 });
 

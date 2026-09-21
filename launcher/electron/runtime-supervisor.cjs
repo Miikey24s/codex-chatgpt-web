@@ -489,6 +489,7 @@ class RuntimeSupervisor {
       detached: DETACH_OWNED_CHILD,
       env: {
         ...process.env,
+        CODEX_CHATGPT_WEB_HOME: this.coreHome,
         CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
       },
       stdio: ["ignore", "pipe", "pipe"],

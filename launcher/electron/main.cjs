@@ -17,8 +17,7 @@ const {
   shell,
   Tray,
 } = require("electron");
-const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
-const { BrowserControlServer } = require("./control-server.cjs");
+const { navigationErrorForLog } = require("./browser-host.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -26,11 +25,10 @@ const {
   installProcessDiagnosticGuards,
   registerLoggedIpc,
 } = require("./logging.cjs");
-const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
-const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { PRIMARY_INSTANCE_ID, createInstanceRegistryStore } = require("./instance-registry.cjs");
+const { ManagedInstance } = require("./managed-instance.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const {
@@ -49,7 +47,6 @@ const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
-const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
@@ -89,6 +86,8 @@ let browserHost = null;
 let runtimeHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
+const managedInstances = new Map();
+let instanceRegistryStore = null;
 let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
@@ -122,6 +121,16 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+function bindSelectedManagedInstance(instanceId) {
+  const managed = managedInstances.get(instanceId);
+  if (!managed) throw new Error(`Managed instance is unavailable: ${instanceId}`);
+  browserHost = managed.browserHost;
+  runtimeHost = managed.runtimeHost;
+  browserControl = managed.browserControl;
+  runtimeSupervisor = managed.runtimeSupervisor;
+  return managed;
 }
 
 function stopCatalogVerificationMonitor() {
@@ -955,16 +964,22 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    for (const managed of managedInstances.values()) {
+      const activeOperation = managed.currentOperation();
+      if (activeOperation) {
+        throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+      }
     }
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
     quitting = true;
-    await browserHost?.persistSession();
-    browserHost?.destroy();
-    await browserControl?.close();
+    for (const managed of managedInstances.values()) {
+      await managed.shutdown({ cancelActiveTurns: true, force: true });
+    }
+    managedInstances.clear();
+    browserHost = null;
+    runtimeHost = null;
+    browserControl = null;
+    runtimeSupervisor = null;
     exitCommitted = true;
     app.quit();
     return { ok: true };
@@ -1016,10 +1031,10 @@ async function start() {
   await app.whenReady();
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
-  const instanceRegistry = createInstanceRegistryStore(path.join(app.getPath("userData"), "instances.json"), {
+  instanceRegistryStore = createInstanceRegistryStore(path.join(app.getPath("userData"), "instances.json"), {
     primaryProfile: LAUNCHER_PROFILE,
   });
-  if (!instanceRegistry.has(stateStore.read().selectedInstanceId)) {
+  if (!instanceRegistryStore.has(stateStore.read().selectedInstanceId)) {
     stateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
   }
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
@@ -1051,7 +1066,7 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   logger.info("instance_registry.ready", {
-    count: instanceRegistry.read().instances.length,
+    count: instanceRegistryStore.read().instances.length,
     selectedInstanceId: stateStore.read().selectedInstanceId,
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
@@ -1062,59 +1077,37 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
-  browserControl = await new BrowserControlServer({
-    logger,
-    getBrowserHost: () => browserHost,
-    getPreferences: () => stateStore.read(),
-    resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
-  }).start();
-  runtimeSupervisor = new RuntimeSupervisor({
+  const primaryRecord = instanceRegistryStore.read().instances.find(instance => instance.id === PRIMARY_INSTANCE_ID);
+  const primaryManagedInstance = new ManagedInstance({
     app,
-    logger,
-    sourceRoot: SOURCE_ROOT,
-    installedRuntimeRoot,
-    runtimeRootProvider,
-    coreHome: CORE_HOME,
-    browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
+    instance: primaryRecord,
     launcherProfile: LAUNCHER_PROFILE.kind,
-    publishOperation,
-  });
-  runtimeHost = new RuntimeHost({
-    app,
-    logger,
-    sourceRoot: SOURCE_ROOT,
-    installedRuntimeRoot,
-    runtimeRootProvider,
-    browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
-    coreHome: CORE_HOME,
     codexHome: LAUNCHER_PROFILE.codexHome,
-    launcherProfile: LAUNCHER_PROFILE.kind,
+    userData: launcherUserData,
+    window: mainWindow,
+    cdpPort,
+    browserHelperPath: BROWSER_HELPER_PATH,
+    sourceRoot: SOURCE_ROOT,
+    installedRuntimeRoot,
+    runtimeRootProvider,
+    logger,
+    stateStore,
+    sessionForPartition: partition => session.fromPartition(partition),
     publishOperation,
-    supervisor: runtimeSupervisor,
-    getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    publishBrowserState: (instanceId, state) => {
+      if (stateStore.read().selectedInstanceId === instanceId) send("launcher:browser-state", state);
+    },
+    showWindow: showMainWindow,
+    isDevProfile: IS_DEV_PROFILE,
   });
+  await primaryManagedInstance.initialize();
+  managedInstances.set(PRIMARY_INSTANCE_ID, primaryManagedInstance);
+  bindSelectedManagedInstance(PRIMARY_INSTANCE_ID);
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
     && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
     stateStore.update({ browserInteractionMode: configuredInteractionMode });
   }
-  browserHost = new BrowserHost({
-    window: mainWindow,
-    descriptorPath: BROWSER_DESCRIPTOR_PATH,
-    cdpPort,
-    control: browserControl.descriptor(),
-    cancelTurn: IS_DEV_PROFILE ? undefined : (traceId, reason) => runtimeSupervisor.cancelBrowserTurn(traceId, reason),
-    getConnectorName: () => runtimeHost.browserConnectorName(),
-    helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
-    logger,
-    loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
-    partition: LAUNCHER_PROFILE.browserPartition,
-    profile: LAUNCHER_PROFILE.kind,
-    publishState: (state) => send("launcher:browser-state", state),
-    showWindow: showMainWindow,
-    getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
-  });
-  await browserHost.ready();
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -1362,8 +1355,10 @@ void start().catch(async (error) => {
     // Browser bootstrap can fail before the renderer is loaded. Keep the error reachable
     // through the existing instance, and release browser resources before a user retry.
     const cleanupErrors = [];
-    try { browserHost?.destroy(); } catch (caught) { cleanupErrors.push(String(caught)); }
-    try { await browserControl?.close(); } catch (caught) { cleanupErrors.push(String(caught)); }
+    for (const managed of managedInstances.values()) {
+      try { managed.browserHost?.destroy(); } catch (caught) { cleanupErrors.push(String(caught)); }
+      try { await managed.browserControl?.close(); } catch (caught) { cleanupErrors.push(String(caught)); }
+    }
     if (process.argv.includes("--launcher-smoke-test")) return;
     await app.whenReady();
     quitting = true;

@@ -309,6 +309,7 @@ class BrowserHost {
     cancelTurn,
     getConnectorName,
     helper,
+    instanceId = "primary",
     logger,
     loginWithPasskey,
     partition = "persist:codex-web-gpt-chatgpt",
@@ -336,10 +337,16 @@ class BrowserHost {
     if (profile !== "production" && profile !== "development") {
       throw new Error("Browser host profile is invalid");
     }
+    if (typeof instanceId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(instanceId)) {
+      throw new Error("Browser host instance id is invalid");
+    }
     const expectedPartition = profile === "development"
       ? "persist:codex-web-gpt-dev-chatgpt"
-      : "persist:codex-web-gpt-chatgpt";
+      : instanceId === "primary"
+        ? "persist:codex-web-gpt-chatgpt"
+        : `persist:codex-web-gpt-${instanceId}`;
     if (partition !== expectedPartition) throw new Error("Browser host partition does not match its profile");
+    this.instanceId = instanceId;
     this.partition = partition;
     this.profile = profile;
     this.publishState = publishState;
@@ -2913,9 +2920,10 @@ class BrowserHost {
       }
     }
     const descriptor = {
-      version: 3,
+      version: 4,
       kind: "codex-web-gpt-launcher",
       profile: this.profile,
+      instanceId: this.instanceId,
       pid: process.pid,
       endpoint: `http://127.0.0.1:${this.cdpPort}`,
       control: this.control,

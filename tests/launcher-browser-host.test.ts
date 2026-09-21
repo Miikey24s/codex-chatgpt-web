@@ -67,6 +67,7 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
   expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({
     kind: LAUNCHER_BROWSER_HOST_KIND,
     profile: "production",
+    instanceId: "primary",
     pid: process.pid,
     endpoint: "http://127.0.0.1:39110",
     surfaceId: "launcher_surface_id_0123456789AB",
@@ -75,6 +76,26 @@ test("launcher descriptor is owner-only, loopback-only, and process-bound", () =
     chmodSync(path, 0o644);
     expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unsafe permissions");
   }
+});
+
+test("launcher descriptor v4 accepts an isolated managed production instance", () => {
+  const path = descriptorFile();
+  const descriptor = JSON.parse(readFileSync(path, "utf8"));
+  descriptor.version = 4;
+  descriptor.instanceId = "instance-2";
+  descriptor.partition = "persist:codex-web-gpt-instance-2";
+  writeFileSync(path, JSON.stringify(descriptor), { mode: 0o600 });
+
+  expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({
+    version: 4,
+    profile: "production",
+    instanceId: "instance-2",
+    partition: "persist:codex-web-gpt-instance-2",
+  });
+
+  descriptor.partition = "persist:codex-web-gpt-chatgpt";
+  writeFileSync(path, JSON.stringify(descriptor), { mode: 0o600 });
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
 });
 
 test("launcher turn control sends authenticated lifecycle events", async () => {

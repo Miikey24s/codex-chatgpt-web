@@ -54,13 +54,15 @@ test("descriptor publishes native surface identities without inspecting renderer
     surfaceId: "h".repeat(32), view: { webContents: contents("home-target") },
     turnTabs: new Map([["automatic", automatic], ["manual", manual]]),
     getBrowserInteractionMode: () => "automatic", profile: "production", cdpPort: 40000,
+    instanceId: "primary",
     partition: "persist:codex-web-gpt-chatgpt", control: {}, helper: {},
     descriptorPath: require("node:path").join(dir, "descriptor.json"),
   };
   try {
     BrowserHost.prototype.writeDescriptor.call(fixture);
     const descriptor = JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8"));
-    assert.equal(descriptor.version, 3);
+    assert.equal(descriptor.version, 4);
+    assert.equal(descriptor.instanceId, "primary");
     assert.deepEqual(descriptor.surfaceTargets, { [fixture.surfaceId]: "home-target", [automatic.surfaceId]: "auto-target" });
     assert.deepEqual(queried, ["home-target", "auto-target"]);
     fixture.getBrowserInteractionMode = () => "manual";
@@ -1111,7 +1113,7 @@ test("launcher quit remains gated through an active embedded-browser operation",
   const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
   assert.match(
     source,
-    /runtimeHost\?\.currentOperation\(\) \|\| browserHost\?\.currentOperation\(\)/,
+    /for \(const managed of managedInstances\.values\(\)\) \{[\s\S]*?managed\.currentOperation\(\)/,
   );
 });
 

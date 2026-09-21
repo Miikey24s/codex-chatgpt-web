@@ -171,6 +171,8 @@ class RuntimeHost {
     browserDescriptorPath,
     coreHome,
     codexHome,
+    userData,
+    instancePort,
     launcherProfile = "production",
     launchAgentsDir,
     platform = process.platform,
@@ -198,6 +200,11 @@ class RuntimeHost {
       : process.env.CODEX_HOME?.trim()
         ? resolveUserPath(process.env.CODEX_HOME.trim())
         : path.join(os.homedir(), ".codex");
+    this.userData = userData ? resolveUserPath(userData) : this.app.getPath("userData");
+    if (instancePort !== undefined && (!Number.isInteger(instancePort) || instancePort < 1 || instancePort > 65_535)) {
+      throw new Error("Runtime host instance port is invalid");
+    }
+    this.instancePort = instancePort;
     this.launchAgentsDir = launchAgentsDir
       ? resolveUserPath(launchAgentsDir)
       : path.join(os.homedir(), "Library", "LaunchAgents");
@@ -250,7 +257,7 @@ class RuntimeHost {
   }
 
   cleanupEphemeralSecrets() {
-    const secretsDir = path.join(this.app.getPath("userData"), "secrets");
+    const secretsDir = path.join(this.userData, "secrets");
     try {
       for (const entry of fs.readdirSync(secretsDir, { withFileTypes: true })) {
         if (/^runtime-key-(?:\d+|[a-f0-9]{32})\.tmp$/.test(entry.name)) {
@@ -267,7 +274,7 @@ class RuntimeHost {
   }
 
   cleanupPasskeyTransfers() {
-    const parent = path.join(this.app.getPath("userData"), "passkey-login");
+    const parent = path.join(this.userData, "passkey-login");
     let entries;
     try {
       entries = fs.readdirSync(parent, { withFileTypes: true });
@@ -329,7 +336,7 @@ class RuntimeHost {
   async capturePasskeyLogin() {
     this.cleanupPasskeyTransfers();
     const chrome = this.passkeyChromeExecutable();
-    const parent = path.join(this.app.getPath("userData"), "passkey-login");
+    const parent = path.join(this.userData, "passkey-login");
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(parent, 0o700); } catch {}
     const transferRoot = fs.mkdtempSync(path.join(parent, "transfer-"));
@@ -417,6 +424,19 @@ class RuntimeHost {
     delete childEnvironment.CODEX_WEB_GPT_LAUNCHER_DATA_DIR;
     childEnvironment.CODEX_WEB_GPT_DEV_HOME = this.coreHome;
     return childEnvironment;
+  }
+
+  runtimeEnvironment(environment = process.env) {
+    if (this.launcherProfile === "development") return this.devSetupEnvironment(environment);
+    return {
+      ...environment,
+      ...(this.coreHome ? { CODEX_CHATGPT_WEB_HOME: this.coreHome } : {}),
+      CODEX_HOME: this.codexHome,
+    };
+  }
+
+  instancePortArgs() {
+    return this.instancePort === undefined ? [] : ["--port", String(this.instancePort)];
   }
 
   runtimeConfigSnapshot() {
@@ -618,7 +638,7 @@ class RuntimeHost {
       const result = await new Promise((resolve, reject) => {
         const environment = options.environment
           ? { ...options.environment }
-          : { ...process.env };
+          : this.runtimeEnvironment();
         Object.assign(environment, {
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
@@ -1011,6 +1031,7 @@ class RuntimeHost {
     const args = [
       "setup",
       mode === "full" ? "--full" : "--browser-only",
+      ...this.instancePortArgs(),
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({
@@ -1242,6 +1263,7 @@ class RuntimeHost {
     const args = [
       "setup",
       "--full",
+      ...this.instancePortArgs(),
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: targetMode }),
@@ -1256,7 +1278,7 @@ class RuntimeHost {
         afterRuntimeReady,
       });
     }
-    const secretsDir = path.join(this.app.getPath("userData"), "secrets");
+    const secretsDir = path.join(this.userData, "secrets");
     fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(secretsDir, 0o700); } catch {}
     const keyPath = path.join(secretsDir, `runtime-key-${randomBytes(16).toString("hex")}.tmp`);
@@ -1307,7 +1329,7 @@ class RuntimeHost {
         afterRuntimeReady,
       });
     }
-    const secretsDir = path.join(this.app.getPath("userData"), "secrets");
+    const secretsDir = path.join(this.userData, "secrets");
     fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(secretsDir, 0o700); } catch {}
     const keyPath = path.join(secretsDir, `runtime-key-${randomBytes(16).toString("hex")}.tmp`);

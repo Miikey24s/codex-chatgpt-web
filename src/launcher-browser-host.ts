@@ -37,9 +37,10 @@ export class LauncherManualTurnFailedError extends Error {
 }
 
 export interface LauncherBrowserHostDescriptor {
-  version: 3;
+  version: 3 | 4;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
   profile: LauncherBrowserHostProfile;
+  instanceId: string;
   pid: number;
   endpoint: string;
   control: {
@@ -83,7 +84,7 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
     throw new Error("Launcher browser descriptor is not an object");
   }
   const descriptor = value as Partial<LauncherBrowserHostDescriptor>;
-  if (descriptor.version !== 3 || descriptor.kind !== LAUNCHER_BROWSER_HOST_KIND) {
+  if ((descriptor.version !== 3 && descriptor.version !== 4) || descriptor.kind !== LAUNCHER_BROWSER_HOST_KIND) {
     throw new Error("Launcher browser descriptor has an unsupported identity or version; restart the updated launcher");
   }
   if (descriptor.profile !== "production" && descriptor.profile !== "development") {
@@ -111,9 +112,15 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (!helperScript || !existsSync(helperScript)) {
     throw new Error("Launcher browser descriptor helper script does not exist");
   }
+  const instanceId = descriptor.version === 3 ? "primary" : descriptor.instanceId;
+  if (typeof instanceId !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(instanceId)) {
+    throw new Error("Launcher browser descriptor has an invalid instance id");
+  }
   const expectedPartition = descriptor.profile === "development"
     ? "persist:codex-web-gpt-dev-chatgpt"
-    : "persist:codex-web-gpt-chatgpt";
+    : instanceId === "primary"
+      ? "persist:codex-web-gpt-chatgpt"
+      : `persist:codex-web-gpt-${instanceId}`;
   if (descriptor.partition !== expectedPartition) {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
@@ -134,9 +141,10 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
     throw new Error("Launcher browser descriptor has an invalid creation time");
   }
   return {
-    version: 3,
+    version: descriptor.version,
     kind: LAUNCHER_BROWSER_HOST_KIND,
     profile: descriptor.profile,
+    instanceId,
     pid: descriptor.pid!,
     endpoint,
     control: { endpoint: controlEndpoint, token: descriptor.control.token },
