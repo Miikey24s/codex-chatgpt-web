@@ -1,0 +1,117 @@
+[
+  {
+    "id": "rate_paraphrase",
+    "message": "Request frequency exceeded for this account; slow down before retrying.",
+    "gold": "rate_limit"
+  },
+  {
+    "id": "auth_paraphrase",
+    "message": "Your access token is no longer valid. Please sign in again.",
+    "gold": "authentication"
+  },
+  {
+    "id": "context_paraphrase",
+    "message": "Prompt exceeds the model's token budget.",
+    "gold": "context_length"
+  },
+  {
+    "id": "overloaded_paraphrase",
+    "message": "The service is at capacity; please try again shortly.",
+    "gold": "overloaded"
+  },
+  {
+    "id": "quota_paraphrase",
+    "message": "Billing credits are exhausted for this account.",
+    "gold": "quota"
+  },
+  {
+    "id": "invalid_request_paraphrase",
+    "message": "The requested model identifier is unknown.",
+    "gold": "invalid_request"
+  },
+  {
+    "id": "client_closed_paraphrase",
+    "message": "The client disconnected before completion.",
+    "gold": "client_closed"
+  },
+  {
+    "id": "subscription_paraphrase",
+    "message": "This feature is available only on a paid plan.",
+    "gold": "subscription"
+  },
+  {
+    "id": "permission_paraphrase",
+    "message": "This account lacks access to the requested model.",
+    "gold": "permission"
+  },
+  {
+    "id": "timeout_paraphrase",
+    "message": "The operation exceeded its allotted time before upstream answered.",
+    "gold": "timeout"
+  },
+  {
+    "id": "subscription_permission_ambiguity",
+    "message": "The credentials were accepted, but the current account plan does not include this model.",
+    "gold": "subscription"
+  },
+  {
+    "id": "permission_policy_paraphrase",
+    "message": "Organization policy blocks this identity from using the requested model.",
+    "gold": "permission"
+  },
+  {
+    "id": "quota_rate_ambiguity",
+    "message": "No billing credits remain for this period; request frequency is normal.",
+    "gold": "quota"
+  },
+  {
+    "id": "negative_client_wording",
+    "message": "The upstream HTTP client closed an idle connection while proxying the model response.",
+    "gold": "unknown"
+  },
+  {
+    "id": "negative_quota_wording",
+    "message": "The requested document contained the word quota, then a TLS handshake failed upstream.",
+    "gold": "unknown"
+  },
+  {
+    "id": "unknown_socket_hangup",
+    "message": "Socket hangup while reading the upstream response body.",
+    "gold": "unknown"
+  },
+  {
+    "id": "unknown_dns",
+    "message": "DNS lookup failed for upstream.example.",
+    "gold": "unknown"
+  },
+  {
+    "id": "unknown_tls",
+    "message": "TLS handshake failed while contacting the upstream service.",
+    "gold": "unknown"
+  },
+  {
+    "id": "unknown_eof",
+    "message": "Unexpected EOF while decoding the upstream response body.",
+    "gold": "unknown"
+  },
+  {
+    "id": "unknown_reset",
+    "message": "ECONNRESET while reading from the upstream socket.",
+    "gold": "unknown"
+  },
+  {
+    "id": "deterministic_rate_limit",
+    "message": "ChatGPT rate limit: too many requests. Try again in a few minutes.",
+    "gold": "rate_limit"
+  },
+  {
+    "id": "deterministic_auth",
+    "message": "Authentication failed: invalid API key.",
+    "gold": "authentication"
+  },
+  {
+    "id": "deterministic_context",
+    "message": "This task exceeds the 225,000-token context window.",
+    "gold": "context_length"
+  }
+]

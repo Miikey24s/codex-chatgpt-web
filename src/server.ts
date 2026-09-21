@@ -47,6 +47,10 @@ import { parseRequest } from "./responses/parser";
 import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import type { CodexProviderConfig } from "./types";
+import {
+  classifyAdapterErrorArrayWithTypeSafe,
+  classifyAdapterErrorsWithTypeSafe,
+} from "./typesafe/error-classifier";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
@@ -632,7 +636,7 @@ export async function responseRequest(
   if (parsed.stream) {
     void run();
     const stream = bridgeToResponsesSSE(
-      queue,
+      classifyAdapterErrorsWithTypeSafe(queue, req.signal),
       responseModel,
       maps.toolNsMap,
       maps.freeformToolNames,
@@ -659,7 +663,7 @@ export async function responseRequest(
   }
 
   await run();
-  const events = await queue.collect();
+  const events = await classifyAdapterErrorArrayWithTypeSafe(await queue.collect(), req.signal);
   const json = buildResponseJSON(events, responseModel, {
     hideThinkingSummary: parsed.options.hideThinkingSummary,
     toolNsMap: maps.toolNsMap,

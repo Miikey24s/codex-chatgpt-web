@@ -8,6 +8,8 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
+import { TYPESAFE_MAX_CHOICE_OPTIONS, typeSafeToolDiscoveryConfig } from "../../typesafe/config";
+import { selectToolWithTypeSafe, type TypeSafeToolCandidate } from "../../typesafe/tool-discovery";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -245,6 +247,34 @@ interface GatewayToolDescriptor {
 interface GatewayToolCatalogPage {
   tools: GatewayToolDescriptor[];
   total: number;
+}
+
+function directInventoryEntry(tool: CodexTool, includeSchema: boolean): Record<string, unknown> {
+  return {
+    wire_name: wireName(tool),
+    name: tool.name,
+    namespace: tool.namespace ?? null,
+    description: browserToolDescription(tool),
+    kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
+    ...(includeSchema ? { parameters: browserToolParameters(tool) } : {}),
+  };
+}
+
+function gatewayInventoryEntry(tool: GatewayToolDescriptor, includeSchema: boolean): Record<string, unknown> {
+  return {
+    wire_name: tool.name,
+    name: tool.name,
+    namespace: null,
+    description: gatewayToolDescription(tool),
+    kind: "gateway",
+    ...(includeSchema ? {
+      parameters: {
+        type: "object",
+        additionalProperties: true,
+        description: "Pass the exact structured arguments declared in this tool's description. For a declared freeform tool, use codex_tool_call.input instead.",
+      },
+    } : {}),
+  };
 }
 
 function gatewayToolDescription(tool: GatewayToolDescriptor): string {
@@ -790,25 +820,20 @@ export async function runChatGptMcpServer(options: {
         const { query, offset, limit, include_schema } = input;
         const bound = claimed.environment;
         const needle = query?.trim().toLowerCase();
-        const directMatches = safeVisibleTools(bound, contract).filter(tool => !needle || [
+        const visibleTools = safeVisibleTools(bound, contract);
+        const directMatches = visibleTools.filter(tool => !needle || [
           wireName(tool),
           tool.name,
           tool.namespace ?? "",
           tool.description,
         ].join("\n").toLowerCase().includes(needle));
-        const directPage = directMatches.slice(offset, offset + limit).map(tool => ({
-          wire_name: wireName(tool),
-          name: tool.name,
-          namespace: tool.namespace ?? null,
-          description: browserToolDescription(tool),
-          kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
-          ...(include_schema ? { parameters: browserToolParameters(tool) } : {}),
-        }));
+        const directPage = directMatches.slice(offset, offset + limit)
+          .map(tool => directInventoryEntry(tool, include_schema));
         let nestedTotal = 0;
         let nestedPage: Array<Record<string, unknown>> = [];
         const gateway = execGateway(bound);
+        const excludedGatewayNames = bound.tools.map(wireName);
         if (gateway) {
-          const excludedGatewayNames = bound.tools.map(wireName);
           const nestedOffset = Math.max(0, offset - directMatches.length);
           const nestedLimit = Math.max(0, limit - directPage.length);
           const response = await invoke(claimed.bindingId, bound, gateway, {
@@ -824,23 +849,50 @@ export async function runChatGptMcpServer(options: {
           }, extra.signal);
           const catalog = gatewayToolCatalogPage(response, new Set(excludedGatewayNames));
           nestedTotal = catalog.total;
-          nestedPage = catalog.tools.map(tool => ({
-            wire_name: tool.name,
-            name: tool.name,
-            namespace: null,
-            description: gatewayToolDescription(tool),
-            kind: "gateway",
-            ...(include_schema ? {
-              parameters: {
-                type: "object",
-                additionalProperties: true,
-                description: "Pass the exact structured arguments declared in this tool's description. For a declared freeform tool, use codex_tool_call.input instead.",
-              },
-            } : {}),
-          }));
+          nestedPage = catalog.tools.map(tool => gatewayInventoryEntry(tool, include_schema));
         }
         const page = [...directPage, ...nestedPage];
         const total = directMatches.length + nestedTotal;
+        if (needle && total === 0 && typeSafeToolDiscoveryConfig().mode !== "off") {
+          let semanticNested: GatewayToolDescriptor[] = [];
+          if (gateway) {
+            const response = await invoke(claimed.bindingId, bound, gateway, {
+              input: gatewayToolCatalogProgram({
+                offset: 0,
+                limit: TYPESAFE_MAX_CHOICE_OPTIONS,
+                excludedNames: excludedGatewayNames,
+              }),
+            }, extra.signal);
+            semanticNested = gatewayToolCatalogPage(response, new Set(excludedGatewayNames)).tools;
+          }
+          const candidates: TypeSafeToolCandidate[] = [
+            ...visibleTools.map(tool => ({
+              wireName: wireName(tool),
+              description: browserToolDescription(tool),
+            })),
+            ...semanticNested.map(tool => ({
+              wireName: tool.name,
+              description: gatewayToolDescription(tool),
+            })),
+          ];
+          const semantic = await selectToolWithTypeSafe(query!, candidates, { signal: extra.signal });
+          if (semantic.wireName) {
+            const direct = visibleTools.find(tool => wireName(tool) === semantic.wireName);
+            const nested = semanticNested.find(tool => tool.name === semantic.wireName);
+            const selected = direct
+              ? directInventoryEntry(direct, include_schema)
+              : nested
+                ? gatewayInventoryEntry(nested, include_schema)
+                : undefined;
+            if (selected) {
+              return result({
+                tools: offset === 0 ? [selected] : [],
+                total: 1,
+                next_offset: null,
+              });
+            }
+          }
+        }
         return result({
           tools: page,
           total,
