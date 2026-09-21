@@ -58,6 +58,7 @@ test("instance registry allocates stable isolated ids ports homes and browser pa
     assert.equal(second.id, "instance-2");
     assert.equal(second.port, 17842);
     assert.equal(second.name, "Work 2");
+    assert.equal(second.enabled, false);
     assert.equal(second.coreHome, path.join(root, ".codex-chatgpt-web-instances", "instance-2"));
     assert.equal(second.browserPartition, "persist:codex-web-gpt-instance-2");
     assert.equal(third.id, "instance-3");
@@ -131,6 +132,28 @@ test("instance registry rejects duplicate durable ownership instead of silently 
       () => createInstanceRegistryStore(file, { primaryProfile: profile }),
       /duplicate ports/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("instance registry updates mutable metadata and refuses to remove primary", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-instance-registry-"));
+  const file = path.join(root, "instances.json");
+  try {
+    const store = createInstanceRegistryStore(file, {
+      primaryProfile: fixtureProfile(root),
+      now: () => "2026-09-21T03:00:00.000Z",
+    });
+    const second = store.create({ name: "Work 2" });
+    const updated = store.update(second.id, { name: "Research", enabled: false, port: 19999 });
+    assert.equal(updated.name, "Research");
+    assert.equal(updated.enabled, false);
+    assert.equal(updated.port, second.port, "durable ownership fields must not be mutable");
+    assert.throws(() => store.remove(PRIMARY_INSTANCE_ID), /Primary instance cannot be removed/);
+    const after = store.remove(second.id);
+    assert.equal(after.instances.length, 1);
+    assert.equal(after.instances[0].id, PRIMARY_INSTANCE_ID);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -88,6 +88,7 @@ let browserControl = null;
 let runtimeSupervisor = null;
 const managedInstances = new Map();
 let instanceRegistryStore = null;
+let selectedManagedInstanceId = PRIMARY_INSTANCE_ID;
 let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
@@ -119,18 +120,48 @@ function send(channel, value) {
 }
 
 function publishOperation(operation) {
-  lastOperation = operation;
-  send("launcher:operation", operation);
+  if (!operation) return;
+  const tagged = operation.instanceId ? operation : { ...operation, instanceId: selectedManagedInstanceId };
+  lastOperation = tagged;
+  send("launcher:operation", tagged);
 }
 
 function bindSelectedManagedInstance(instanceId) {
   const managed = managedInstances.get(instanceId);
   if (!managed) throw new Error(`Managed instance is unavailable: ${instanceId}`);
+  if (selectedManagedInstanceId !== instanceId) {
+    const previous = managedInstances.get(selectedManagedInstanceId);
+    previous?.browserHost?.setSurfaceActive(false);
+    previous?.browserHost?.hide();
+  }
+  selectedManagedInstanceId = instanceId;
   browserHost = managed.browserHost;
   runtimeHost = managed.runtimeHost;
   browserControl = managed.browserControl;
   runtimeSupervisor = managed.runtimeSupervisor;
   return managed;
+}
+
+function instanceSnapshots() {
+  const registry = instanceRegistryStore?.read().instances ?? [];
+  return registry.map((record) => {
+    const managed = managedInstances.get(record.id);
+    return {
+      ...record,
+      initialized: managed?.initialized === true,
+      browser: managed?.browserHost?.snapshot() ?? null,
+      configured: managed?.runtimeHost?.runtimeConfigSnapshot().configured ?? false,
+      operation: managed?.currentOperation() ?? null,
+      state: managed?.stateStore?.read() ?? null,
+    };
+  });
+}
+
+function publishInstancesChanged() {
+  send("launcher:instances-changed", {
+    selectedInstanceId: selectedManagedInstanceId,
+    instances: instanceSnapshots(),
+  });
 }
 
 function stopCatalogVerificationMonitor() {
@@ -502,7 +533,14 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
-function registerIpc({ logger, stateStore }) {
+function registerIpc({
+  logger,
+  stateStore,
+  managerStateStore = stateStore,
+  ensureManagedInstance,
+  selectManagedInstance,
+  syncCockpitPool,
+}) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
@@ -511,6 +549,8 @@ function registerIpc({ logger, stateStore }) {
       codexHome: LAUNCHER_PROFILE.codexHome,
       userData: launcherUserData,
     },
+    selectedInstanceId: managerStateStore.read().selectedInstanceId,
+    instances: instanceSnapshots(),
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
     connectorName: runtimeHost.browserConnectorName(),
@@ -528,6 +568,140 @@ function registerIpc({ logger, stateStore }) {
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
   }));
+
+  const managerResult = (extra = {}) => ({
+    selectedInstanceId: managerStateStore.read().selectedInstanceId,
+    instances: instanceSnapshots(),
+    ...extra,
+  });
+
+  handle("launcher:instance-create", async (_event, input) => {
+    if (IS_DEV_PROFILE) throw new Error("The DEV launcher supports only its isolated primary instance");
+    const instance = instanceRegistryStore.create({ name: input?.name });
+    try {
+      await ensureManagedInstance(instance.id);
+    } catch (error) {
+      instanceRegistryStore.remove(instance.id);
+      throw error;
+    }
+    managerStateStore.update({ selectedInstanceId: instance.id });
+    selectManagedInstance(instance.id);
+    publishInstancesChanged();
+    return managerResult({ instance });
+  });
+
+  handle("launcher:instance-select", async (_event, instanceId) => {
+    if (!instanceRegistryStore.has(instanceId)) throw new Error(`Unknown instance: ${instanceId}`);
+    await ensureManagedInstance(instanceId);
+    managerStateStore.update({ selectedInstanceId: instanceId });
+    selectManagedInstance(instanceId);
+    publishInstancesChanged();
+    return managerResult();
+  });
+
+  handle("launcher:instance-rename", async (_event, instanceId, name) => {
+    const instance = instanceRegistryStore.update(instanceId, { name });
+    const cockpit = await syncCockpitPool();
+    publishInstancesChanged();
+    return managerResult({ instance, cockpit });
+  });
+
+  handle("launcher:instance-start", async (_event, instanceId) => {
+    const managed = await ensureManagedInstance(instanceId);
+    const runtime = await managed.startRuntime();
+    if (runtime?.status !== "ready") {
+      throw new Error(`Instance runtime is not ready: ${runtime?.detail || runtime?.status || "unknown status"}`);
+    }
+    const instance = instanceRegistryStore.update(instanceId, { enabled: true });
+    const cockpit = await syncCockpitPool();
+    publishInstancesChanged();
+    return managerResult({ instance, runtime, cockpit });
+  });
+
+  handle("launcher:instance-stop", async (_event, instanceId) => {
+    if (instanceId === PRIMARY_INSTANCE_ID) {
+      throw new Error("Primary instance cannot be disabled from the account pool");
+    }
+    const managed = await ensureManagedInstance(instanceId);
+    const previous = instanceRegistryStore.update(instanceId, { enabled: false });
+    const cockpit = await syncCockpitPool();
+    if (cockpit?.ok !== true) {
+      instanceRegistryStore.update(instanceId, { enabled: true });
+      throw new Error(cockpit?.message || "Cockpit did not acknowledge instance removal from the active pool");
+    }
+    try {
+      const runtime = await managed.stopRuntime();
+      publishInstancesChanged();
+      return managerResult({ instance: previous, runtime });
+    } catch (error) {
+      instanceRegistryStore.update(instanceId, { enabled: true });
+      await syncCockpitPool().catch(() => {});
+      publishInstancesChanged();
+      throw error;
+    }
+  });
+
+  handle("launcher:instance-restart", async (_event, instanceId) => {
+    const managed = await ensureManagedInstance(instanceId);
+    const wasEnabled = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId)?.enabled === true;
+    if (wasEnabled && instanceId !== PRIMARY_INSTANCE_ID) {
+      instanceRegistryStore.update(instanceId, { enabled: false });
+      const cockpit = await syncCockpitPool();
+      if (cockpit?.ok !== true) {
+        instanceRegistryStore.update(instanceId, { enabled: true });
+        throw new Error(cockpit?.message || "Cockpit did not acknowledge the temporary instance drain");
+      }
+    }
+    try {
+      const runtime = await managed.restartRuntime();
+      if (wasEnabled && instanceId !== PRIMARY_INSTANCE_ID) {
+        instanceRegistryStore.update(instanceId, { enabled: true });
+        await syncCockpitPool();
+      }
+      publishInstancesChanged();
+      return managerResult({ runtime });
+    } catch (error) {
+      publishInstancesChanged();
+      throw error;
+    }
+  });
+
+  handle("launcher:instance-remove", async (_event, instanceId) => {
+    if (instanceId === PRIMARY_INSTANCE_ID) throw new Error("Primary instance cannot be removed");
+    const managed = managedInstances.get(instanceId);
+    const wasEnabled = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId)?.enabled === true;
+    instanceRegistryStore.update(instanceId, { enabled: false });
+    const cockpit = await syncCockpitPool();
+    if (cockpit?.ok !== true) {
+      if (wasEnabled) instanceRegistryStore.update(instanceId, { enabled: true });
+      throw new Error(cockpit?.message || "Cockpit did not acknowledge instance removal from the active pool");
+    }
+    try {
+      if (managed) {
+        await managed.stopRuntime();
+        await managed.shutdown({ cancelActiveTurns: false, force: false });
+        managedInstances.delete(instanceId);
+      }
+    } catch (error) {
+      if (wasEnabled) {
+        instanceRegistryStore.update(instanceId, { enabled: true });
+        await syncCockpitPool().catch(() => {});
+      }
+      throw error;
+    }
+    const removed = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId);
+    instanceRegistryStore.remove(instanceId);
+    if (managerStateStore.read().selectedInstanceId === instanceId) {
+      managerStateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
+      await ensureManagedInstance(PRIMARY_INSTANCE_ID);
+      selectManagedInstance(PRIMARY_INSTANCE_ID);
+    }
+    const finalCockpit = await syncCockpitPool();
+    publishInstancesChanged();
+    return managerResult({ retainedDataPath: removed?.coreHome ?? null, cockpit: finalCockpit });
+  });
+
+  handle("launcher:cockpit-pool-sync", async () => managerResult({ cockpit: await syncCockpitPool() }));
 
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });
@@ -1030,44 +1204,82 @@ async function start() {
 
   await app.whenReady();
 
-  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const managerStateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   instanceRegistryStore = createInstanceRegistryStore(path.join(app.getPath("userData"), "instances.json"), {
     primaryProfile: LAUNCHER_PROFILE,
   });
-  if (!instanceRegistryStore.has(stateStore.read().selectedInstanceId)) {
-    stateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
+  if (!instanceRegistryStore.has(managerStateStore.read().selectedInstanceId)) {
+    managerStateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
   }
-  if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
-    stateStore.update({
-      language: stateStore.read().language || "en",
+  if (IS_DEV_PROFILE && !managerStateStore.read().onboardingComplete) {
+    managerStateStore.update({
+      language: managerStateStore.read().language || "en",
       onboardingComplete: true,
       autoStart: false,
     });
   }
-  if (stateStore.read().sessionRefreshReminderAt === null) {
-    stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+  if (managerStateStore.read().sessionRefreshReminderAt === null) {
+    managerStateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
   }
-  const persistedState = stateStore.read();
+  const persistedState = managerStateStore.read();
   if (persistedState.coreSetupComplete === true) {
-    stateStore.update({
+    managerStateStore.update({
       codexCatalogVerified: true,
       codexRestartRequired: false,
     });
   }
   const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
   if (!IS_DEV_PROFILE
-    && stateStore.read().onboardingComplete
+    && managerStateStore.read().onboardingComplete
     && autostart.supported
-    && stateStore.read().autoStart !== autostart.enabled) {
-    setAutostart(app, stateStore.read().autoStart);
+    && managerStateStore.read().autoStart !== autostart.enabled) {
+    setAutostart(app, managerStateStore.read().autoStart);
   }
+  const instanceStateStores = new Map([[PRIMARY_INSTANCE_ID, managerStateStore]]);
+  const globalStateKeys = new Set([
+    "language", "onboardingComplete", "githubOpened", "xOpened", "autoStart",
+    "keepRunningOnClose", "showBrowserDuringTurns", "sidebarOpen", "sidebarWidth", "selectedInstanceId",
+  ]);
+  const stateStoreForInstance = (instance) => {
+    if (instance.id === PRIMARY_INSTANCE_ID) return managerStateStore;
+    let store = instanceStateStores.get(instance.id);
+    if (!store) {
+      store = createStateStore(path.join(instance.coreHome, "launcher-state.json"));
+      instanceStateStores.set(instance.id, store);
+    }
+    return store;
+  };
+  const stateStore = {
+    read() {
+      const manager = managerStateStore.read();
+      const selected = instanceRegistryStore.read().instances.find(instance => instance.id === manager.selectedInstanceId);
+      const local = selected ? stateStoreForInstance(selected).read() : manager;
+      const merged = { ...manager, ...local };
+      for (const key of globalStateKeys) merged[key] = manager[key];
+      return merged;
+    },
+    update(patch) {
+      const manager = managerStateStore.read();
+      const selected = instanceRegistryStore.read().instances.find(instance => instance.id === manager.selectedInstanceId);
+      const localStore = selected ? stateStoreForInstance(selected) : managerStateStore;
+      if (localStore === managerStateStore) return managerStateStore.update(patch);
+      const globalPatch = {};
+      const localPatch = {};
+      for (const [key, value] of Object.entries(patch ?? {})) {
+        (globalStateKeys.has(key) ? globalPatch : localPatch)[key] = value;
+      }
+      if (Object.keys(globalPatch).length > 0) managerStateStore.update(globalPatch);
+      if (Object.keys(localPatch).length > 0) localStore.update(localPatch);
+      return this.read();
+    },
+  };
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
   logger.info("instance_registry.ready", {
     count: instanceRegistryStore.read().instances.length,
-    selectedInstanceId: stateStore.read().selectedInstanceId,
+    selectedInstanceId: managerStateStore.read().selectedInstanceId,
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
@@ -1077,10 +1289,9 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
-  const primaryRecord = instanceRegistryStore.read().instances.find(instance => instance.id === PRIMARY_INSTANCE_ID);
-  const primaryManagedInstance = new ManagedInstance({
+  const createManagedInstance = (instance) => new ManagedInstance({
     app,
-    instance: primaryRecord,
+    instance,
     launcherProfile: LAUNCHER_PROFILE.kind,
     codexHome: LAUNCHER_PROFILE.codexHome,
     userData: launcherUserData,
@@ -1091,18 +1302,79 @@ async function start() {
     installedRuntimeRoot,
     runtimeRootProvider,
     logger,
-    stateStore,
+    stateStore: stateStoreForInstance(instance),
     sessionForPartition: partition => session.fromPartition(partition),
     publishOperation,
-    publishBrowserState: (instanceId, state) => {
-      if (stateStore.read().selectedInstanceId === instanceId) send("launcher:browser-state", state);
+    publishBrowserState: (instanceId, browserState) => {
+      send("launcher:instance-browser-state", { instanceId, state: browserState });
+      if (managerStateStore.read().selectedInstanceId === instanceId) send("launcher:browser-state", browserState);
     },
-    showWindow: showMainWindow,
+    showWindow: () => {
+      if (managerStateStore.read().selectedInstanceId === instance.id) showMainWindow();
+    },
     isDevProfile: IS_DEV_PROFILE,
   });
-  await primaryManagedInstance.initialize();
-  managedInstances.set(PRIMARY_INSTANCE_ID, primaryManagedInstance);
-  bindSelectedManagedInstance(PRIMARY_INSTANCE_ID);
+  const ensureManagedInstance = async (instanceId) => {
+    const existing = managedInstances.get(instanceId);
+    if (existing?.initialized) return existing;
+    const instance = instanceRegistryStore.read().instances.find(candidate => candidate.id === instanceId);
+    if (!instance) throw new Error(`Unknown instance: ${instanceId}`);
+    if (IS_DEV_PROFILE && instanceId !== PRIMARY_INSTANCE_ID) {
+      throw new Error("The DEV launcher supports only its isolated primary instance");
+    }
+    const managed = existing ?? createManagedInstance(instance);
+    managedInstances.set(instanceId, managed);
+    try {
+      await managed.initialize();
+      if (managerStateStore.read().selectedInstanceId !== instanceId) {
+        managed.browserHost.setSurfaceActive(false);
+        managed.browserHost.hide();
+      }
+      return managed;
+    } catch (error) {
+      managedInstances.delete(instanceId);
+      try { managed.browserHost?.destroy(); } catch {}
+      try { await managed.browserControl?.close(); } catch {}
+      throw error;
+    }
+  };
+  const selectManagedInstance = (instanceId) => {
+    const managed = bindSelectedManagedInstance(instanceId);
+    managed.browserHost.setSurfaceActive(false);
+    return managed;
+  };
+
+  const primaryManagedInstance = await ensureManagedInstance(PRIMARY_INSTANCE_ID);
+  for (const instance of instanceRegistryStore.read().instances) {
+    if (instance.id === PRIMARY_INSTANCE_ID) continue;
+    if (!instance.enabled && instance.id !== managerStateStore.read().selectedInstanceId) continue;
+    try {
+      await ensureManagedInstance(instance.id);
+    } catch (error) {
+      logger.error("instance.initialization_failed", {
+        instanceId: instance.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const initialSelectedId = managedInstances.has(managerStateStore.read().selectedInstanceId)
+    ? managerStateStore.read().selectedInstanceId
+    : PRIMARY_INSTANCE_ID;
+  if (initialSelectedId !== managerStateStore.read().selectedInstanceId) {
+    managerStateStore.update({ selectedInstanceId: initialSelectedId });
+  }
+  selectManagedInstance(initialSelectedId);
+  const syncCockpitPool = async () => {
+    if (IS_DEV_PROFILE) return { ok: false, skipped: true, message: "DEV launcher has no Cockpit account pool" };
+    return primaryManagedInstance.runtimeHost.syncCockpitPool(
+      instanceRegistryStore.read().instances.map(instance => ({
+        id: instance.id,
+        name: instance.name,
+        port: instance.port,
+        enabled: instance.enabled,
+      })),
+    );
+  };
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
     && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
@@ -1122,7 +1394,14 @@ async function start() {
     publish: (state) => send("launcher:update-state", state),
     logger,
   });
-  registerIpc({ logger, stateStore });
+  registerIpc({
+    logger,
+    stateStore,
+    managerStateStore,
+    ensureManagedInstance,
+    selectManagedInstance,
+    syncCockpitPool,
+  });
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
@@ -1136,6 +1415,49 @@ async function start() {
   }
   await loadRenderer(mainWindow);
   if (!launcherSmokeTest) void updateController.checkOnce();
+  if (!launcherSmokeTest && !IS_DEV_PROFILE) {
+    const selectedId = managerStateStore.read().selectedInstanceId;
+    const backgroundStarts = instanceRegistryStore.read().instances
+      .filter(instance => instance.enabled && instance.id !== selectedId)
+      .map(async (instance) => {
+        const managed = await ensureManagedInstance(instance.id);
+        const localState = managed.stateStore.read();
+        if (localState.browserInteractionMode === "automatic") {
+          await managed.browserHost.refreshAuthentication().catch((error) => {
+            logger.warn("instance.session_refresh_failed", {
+              instanceId: instance.id,
+              ...navigationErrorForLog(error),
+            });
+          });
+        }
+        await managed.runtimeHost.upgradeManagedRuntime();
+        const runtime = await managed.startRuntime();
+        logger.info("instance.runtime_started", { instanceId: instance.id, status: runtime.status });
+        return runtime;
+      });
+    if (backgroundStarts.length > 0) {
+      void Promise.allSettled(backgroundStarts).then(async (results) => {
+        results.forEach((result, index) => {
+          if (result.status === "rejected") {
+            logger.error("instance.runtime_start_failed", {
+              message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            });
+          }
+        });
+        if (instanceRegistryStore.read().instances.length > 1) {
+          try {
+            const cockpit = await syncCockpitPool();
+            if (cockpit?.ok !== true) logger.warn("cockpit.instance_pool_sync_incomplete", { cockpit });
+          } catch (error) {
+            logger.error("cockpit.instance_pool_sync_failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        publishInstancesChanged();
+      });
+    }
+  }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {

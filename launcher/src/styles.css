@@ -994,6 +994,191 @@ code {
   line-height: 1.55;
 }
 
+.instance-toolbar {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.instance-add-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.instance-add-field input {
+  width: min(280px, 34vw);
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+}
+
+.instance-add-field .button-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.instance-add-field .button-primary svg {
+  width: 13px;
+  height: 13px;
+}
+
+.instance-pool-meta {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.instance-table-wrap {
+  min-height: 0;
+  overflow: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.instance-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: var(--text-sm);
+}
+
+.instance-table th,
+.instance-table td {
+  height: 42px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--color-border);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-table th {
+  height: 32px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.instance-table th:first-child,
+.instance-table td:first-child {
+  width: 88px;
+}
+
+.instance-table th:nth-child(4),
+.instance-table td:nth-child(4) {
+  width: 96px;
+}
+
+.instance-table th:nth-child(5),
+.instance-table td:nth-child(5),
+.instance-table th:nth-child(6),
+.instance-table td:nth-child(6) {
+  width: 110px;
+}
+
+.instance-table tr.is-selected td {
+  background: var(--color-background-control-hover);
+}
+
+.instance-name-button {
+  max-width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  text-transform: capitalize;
+}
+
+.instance-status.is-off {
+  color: var(--color-text-tertiary);
+}
+
+.instance-detail {
+  flex: none;
+  padding-top: 16px;
+}
+
+.instance-detail > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.instance-detail > header span {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.instance-detail h2 {
+  margin: 4px 0 3px;
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.instance-detail p {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.instance-runtime-actions,
+.instance-detail-tabs,
+.diagnostics-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.instance-detail-tabs {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.instance-remove-button {
+  min-height: 30px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.instance-remove-button:hover:not(:disabled) {
+  color: var(--color-text-error);
+}
+
+.diagnostics-actions {
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
 .section-heading {
   display: flex;
   min-height: 28px;

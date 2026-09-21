@@ -16,6 +16,7 @@ import type {
   BrowserInteractionMode,
   BrowserState,
   DoctorReport,
+  InstanceSnapshot,
   Language,
   LauncherSnapshot,
   LauncherState,
@@ -40,6 +41,15 @@ export function App() {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
+
+  const refreshSnapshot = useCallback(async () => {
+    if (!api) return;
+    const next = await api.snapshot();
+    setSnapshot(next);
+    setBrowser(next.browser);
+    setLogs(next.logs);
+    setOperation(next.operation);
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = documentLanguage;
@@ -69,6 +79,17 @@ export function App() {
         : current);
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeInstances = api.onInstancesChanged(() => {
+      void refreshSnapshot().catch((cause) => setError(messageOf(cause)));
+    });
+    const unsubscribeInstanceBrowser = api.onInstanceBrowserState(({ instanceId, state }) => {
+      setSnapshot((current) => current ? {
+        ...current,
+        instances: current.instances.map(instance => instance.id === instanceId
+          ? { ...instance, browser: state }
+          : instance),
+      } : current);
+    });
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -81,11 +102,13 @@ export function App() {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
+      unsubscribeInstances();
+      unsubscribeInstanceBrowser();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
     };
-  }, []);
+  }, [refreshSnapshot]);
 
   const updateState = useCallback((state: LauncherState) => {
     setSnapshot((current) => current
@@ -129,6 +152,7 @@ export function App() {
             language={language}
             logs={logs}
             operation={operation}
+            refreshSnapshot={refreshSnapshot}
             setError={setError}
             snapshot={snapshot}
             updateState={updateState}
@@ -318,6 +342,7 @@ function LauncherShell({
   language,
   logs,
   operation,
+  refreshSnapshot,
   setError,
   snapshot,
   updateState,
@@ -327,6 +352,7 @@ function LauncherShell({
   language: Language;
   logs: LogRecord[];
   operation: OperationState | null;
+  refreshSnapshot: () => Promise<void>;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -335,7 +361,7 @@ function LauncherShell({
   const firstRunZeroRiskSetup = snapshot.state.browserInteractionMode === "manual"
     && snapshot.state.coreSetupComplete !== true;
   const [surface, setSurface] = useState<Surface>(
-    firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
+    firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "instances" : "setup",
   );
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
@@ -569,6 +595,12 @@ function LauncherShell({
             <nav className="sidebar-nav" aria-label={copy.workspace}>
               <SidebarGroup label={copy.workspace}>
                 <SidebarItem
+                  active={surface === "instances"}
+                  icon="mcp"
+                  label="Instances"
+                  onClick={() => navigateSurface("instances")}
+                />
+                <SidebarItem
                   active={surface === "browser"}
                   badge={needsBrowser
                     ? <ActionDot pulse tone="required" />
@@ -636,6 +668,16 @@ function LauncherShell({
             key={surface}
             transition={{ duration: 0.16 }}
           >
+            {surface === "instances" ? (
+              <InstancesSurface
+                busy={operation?.status === "running"}
+                devProfile={devProfile}
+                openSurface={navigateSurface}
+                refreshSnapshot={refreshSnapshot}
+                setError={setError}
+                snapshot={snapshot}
+              />
+            ) : null}
             {surface === "browser" ? (
               <BrowserSurface
                 browser={browser}
@@ -681,6 +723,9 @@ function LauncherShell({
             ) : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+            ) : null}
+            {surface === "diagnostics" ? (
+              <DiagnosticsSurface copy={copy} language={language} setError={setError} snapshot={snapshot} />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
@@ -791,6 +836,183 @@ function SidebarItem({
       <span>{label}</span>
       {badge ? <i className="sidebar-item-badge">{badge}</i> : null}
     </button>
+  );
+}
+
+function InstancesSurface({
+  busy,
+  devProfile,
+  openSurface,
+  refreshSnapshot,
+  setError,
+  snapshot,
+}: {
+  busy: boolean;
+  devProfile: boolean;
+  openSurface: (surface: Surface) => void;
+  refreshSnapshot: () => Promise<void>;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+}) {
+  const [newName, setNewName] = useState("");
+  const [actionInstanceId, setActionInstanceId] = useState<string | null>(null);
+  const selected = snapshot.instances.find(instance => instance.id === snapshot.selectedInstanceId)
+    ?? snapshot.instances[0];
+  const actionBusy = busy || actionInstanceId !== null;
+
+  const run = async (instanceId: string, action: () => Promise<unknown>) => {
+    if (actionBusy) return;
+    setActionInstanceId(instanceId);
+    setError(null);
+    try {
+      await action();
+      await refreshSnapshot();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActionInstanceId(null);
+    }
+  };
+
+  const create = async () => {
+    if (actionBusy || devProfile) return;
+    setActionInstanceId("new");
+    setError(null);
+    try {
+      await api!.createInstance(newName.trim() ? { name: newName.trim() } : undefined);
+      setNewName("");
+      await refreshSnapshot();
+      openSurface("browser");
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActionInstanceId(null);
+    }
+  };
+
+  const select = async (instance: InstanceSnapshot) => {
+    if (instance.id === snapshot.selectedInstanceId || actionBusy) return;
+    await run(instance.id, () => api!.selectInstance(instance.id));
+  };
+
+  const remove = async (instance: InstanceSnapshot) => {
+    if (instance.id === "primary" || actionBusy) return;
+    if (!window.confirm(`Remove ${instance.name} from the manager? Its profile data will be kept on disk.`)) return;
+    await run(instance.id, () => api!.removeInstance(instance.id));
+  };
+
+  return (
+    <ContentSurface
+      fit
+      subtitle="Run isolated ChatGPT Web accounts through one Cockpit-managed pool. Each instance keeps its own browser session and runtime state."
+      title="Instances"
+    >
+      <div className="instance-toolbar">
+        <div className="instance-add-field">
+          <input
+            aria-label="Instance name"
+            disabled={actionBusy || devProfile}
+            maxLength={80}
+            onChange={(event) => setNewName(event.target.value)}
+            placeholder={devProfile ? "DEV profile supports one instance" : "New instance name (optional)"}
+            value={newName}
+          />
+          <PrimaryButton disabled={actionBusy || devProfile} onClick={() => void create()}>
+            <Icon name="plus" /> Add instance
+          </PrimaryButton>
+        </div>
+        <span className="instance-pool-meta">{snapshot.instances.length} total · {snapshot.instances.filter(instance => instance.enabled).length} enabled</span>
+      </div>
+
+      <div className="instance-table-wrap">
+        <table className="instance-table">
+          <thead>
+            <tr><th>Status</th><th>Name</th><th>Account</th><th>Endpoint</th><th>Health</th><th>Cockpit</th></tr>
+          </thead>
+          <tbody>
+            {snapshot.instances.map((instance) => {
+              const active = instance.id === snapshot.selectedInstanceId;
+              const status = instance.operation?.status === "running"
+                ? "busy"
+                : !instance.enabled
+                  ? "off"
+                  : instance.browser?.status === "error"
+                    ? "error"
+                    : "ready";
+              const signedIn = instance.browser?.authenticated === true;
+              return (
+                <tr className={active ? "is-selected" : ""} key={instance.id}>
+                  <td><span className={`instance-status is-${status}`}><StateDot state={status === "error" ? "error" : status === "busy" ? "busy" : status === "ready" ? "ready" : "idle"} />{status}</span></td>
+                  <td><button className="instance-name-button" disabled={actionBusy} onClick={() => void select(instance)} type="button">{instance.name}</button></td>
+                  <td>{signedIn ? "Signed in" : "Signed out"}</td>
+                  <td><code>:{instance.port}</code></td>
+                  <td>{instance.configured ? (instance.initialized ? "Ready" : "Configured") : "Setup needed"}</td>
+                  <td>{instance.enabled ? "Enabled" : "Disabled"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {selected ? (
+        <section className="instance-detail">
+          <header>
+            <div>
+              <span>Selected instance</span>
+              <h2>{selected.name}</h2>
+              <p><code>127.0.0.1:{selected.port}</code> · {selected.browser?.authenticated ? "Signed in" : "Signed out"}</p>
+            </div>
+            <div className="instance-runtime-actions">
+              {selected.enabled ? (
+                <SecondaryButton disabled={actionBusy} icon="reload" onClick={() => void run(selected.id, () => api!.restartInstance(selected.id))}>Restart</SecondaryButton>
+              ) : (
+                <PrimaryButton disabled={actionBusy || !selected.configured} onClick={() => void run(selected.id, () => api!.startInstance(selected.id))}>Start</PrimaryButton>
+              )}
+              {selected.enabled && selected.id !== "primary" ? (
+                <SecondaryButton disabled={actionBusy} icon="minus" onClick={() => void run(selected.id, () => api!.stopInstance(selected.id))}>Stop</SecondaryButton>
+              ) : null}
+            </div>
+          </header>
+          <div className="instance-detail-tabs">
+            <SecondaryButton icon="browser" onClick={() => openSurface("browser")}>Browser</SecondaryButton>
+            <SecondaryButton icon="setup" onClick={() => openSurface("setup")}>Setup</SecondaryButton>
+            <SecondaryButton icon="activity" onClick={() => openSurface("diagnostics")}>Diagnostics</SecondaryButton>
+            {selected.id !== "primary" ? (
+              <button className="instance-remove-button" disabled={actionBusy} onClick={() => void remove(selected)} type="button">Remove</button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+    </ContentSurface>
+  );
+}
+
+function DiagnosticsSurface({ copy, language, setError, snapshot }: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+}) {
+  const [report, setReport] = useState<DoctorReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const selected = snapshot.instances.find(instance => instance.id === snapshot.selectedInstanceId);
+  const run = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try { setReport(await api!.doctor()); }
+    catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <ContentSurface narrow subtitle={`Runtime and browser checks for ${selected?.name ?? "the selected instance"}.`} title="Diagnostics">
+      <div className="diagnostics-actions">
+        <PrimaryButton disabled={busy} onClick={() => void run()}>{busy ? "Checking…" : "Run diagnostics"}</PrimaryButton>
+        <span><code>127.0.0.1:{selected?.port ?? "—"}</code></span>
+      </div>
+      {report ? <DoctorSummary copy={copy} language={language} report={report} /> : null}
+    </ContentSurface>
   );
 }
 

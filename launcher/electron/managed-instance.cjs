@@ -146,6 +146,21 @@ class ManagedInstance {
     };
   }
 
+  async startRuntime() {
+    await this.initialize();
+    return this.runtimeSupervisor.startIfConfigured();
+  }
+
+  async stopRuntime() {
+    if (!this.initialized) return { status: "stopped" };
+    return this.runtimeSupervisor.stopForSetup();
+  }
+
+  async restartRuntime() {
+    await this.initialize();
+    return this.runtimeSupervisor.restart();
+  }
+
   async shutdown({ cancelActiveTurns = true, force = true } = {}) {
     const activeOperation = this.currentOperation();
     if (activeOperation) {

@@ -155,7 +155,7 @@ function createInstanceRegistryStore(filePath, { primaryProfile, now = () => new
         port: nextPort(registry.instances),
         coreHome: path.join(managedInstancesRoot(primaryProfile), id),
         browserPartition: `persist:codex-web-gpt-${id}`,
-        enabled: true,
+        enabled: false,
         createdAt: now(),
       });
       registry = validateRegistry({
@@ -164,6 +164,32 @@ function createInstanceRegistryStore(filePath, { primaryProfile, now = () => new
       });
       persist();
       return structuredClone(instance);
+    },
+    update(instanceId, patch = {}) {
+      const index = registry.instances.findIndex(instance => instance.id === instanceId);
+      if (index < 0) throw new Error(`Unknown instance: ${instanceId}`);
+      const current = registry.instances[index];
+      const allowed = {};
+      if (Object.hasOwn(patch, "name")) allowed.name = patch.name;
+      if (Object.hasOwn(patch, "enabled")) allowed.enabled = patch.enabled;
+      const next = validateInstance({ ...current, ...allowed });
+      const instances = registry.instances.slice();
+      instances[index] = next;
+      registry = validateRegistry({ version: INSTANCE_REGISTRY_VERSION, instances });
+      persist();
+      return structuredClone(next);
+    },
+    remove(instanceId) {
+      if (instanceId === PRIMARY_INSTANCE_ID) throw new Error("Primary instance cannot be removed");
+      if (!registry.instances.some(instance => instance.id === instanceId)) {
+        throw new Error(`Unknown instance: ${instanceId}`);
+      }
+      registry = validateRegistry({
+        version: INSTANCE_REGISTRY_VERSION,
+        instances: registry.instances.filter(instance => instance.id !== instanceId),
+      });
+      persist();
+      return structuredClone(registry);
     },
   };
 }

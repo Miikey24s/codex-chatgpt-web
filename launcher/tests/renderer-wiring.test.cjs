@@ -11,6 +11,30 @@ const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "b
 const managedInstanceSource = fs.readFileSync(path.join(launcherRoot, "electron", "managed-instance.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 
+test("manager IPC exposes instance-scoped lifecycle and pool state to the renderer", () => {
+  for (const channel of [
+    "launcher:instance-create",
+    "launcher:instance-select",
+    "launcher:instance-rename",
+    "launcher:instance-start",
+    "launcher:instance-stop",
+    "launcher:instance-restart",
+    "launcher:instance-remove",
+    "launcher:cockpit-pool-sync",
+  ]) {
+    assert.match(preloadSource, new RegExp(channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(electronMain, new RegExp(channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(preloadSource, /launcher:instances-changed/);
+  assert.match(preloadSource, /launcher:instance-browser-state/);
+  assert.match(electronMain, /selectedInstanceId:\s*managerStateStore\.read\(\)\.selectedInstanceId/);
+  assert.match(electronMain, /instances:\s*instanceSnapshots\(\)/);
+  assert.match(appSource, /title="Instances"/);
+  assert.match(appSource, /api!\.createInstance/);
+  assert.match(appSource, /api!\.selectInstance/);
+  assert.match(appSource, /api!\.startInstance/);
+});
+
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
@@ -173,7 +197,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const managedConstruction = electronMain.indexOf("new ManagedInstance({", start);
-  const browserReady = electronMain.indexOf("await primaryManagedInstance.initialize();", start);
+  const browserReady = electronMain.indexOf("const primaryManagedInstance = await ensureManagedInstance(PRIMARY_INSTANCE_ID);", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
   for (const [surface, position] of [
@@ -191,7 +215,7 @@ test("DEV launcher exposes its profile and supervises only its Full-mode MCP run
   assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
   assert.match(electronMain, /await managed\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
-  assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
+  assert.match(electronMain, /IS_DEV_PROFILE && !managerStateStore\.read\(\)\.onboardingComplete/);
   assert.match(electronMain, /onboardingComplete:\s*true,[\s\S]*?autoStart:\s*false/);
   assert.match(appSource, /snapshot\.profile === "development"/);
   assert.match(appSource, /data-profile=\{snapshot\.profile\}/);

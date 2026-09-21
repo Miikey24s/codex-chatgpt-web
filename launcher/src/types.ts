@@ -3,7 +3,7 @@ import languages from "../electron/languages.json";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "instances" | "browser" | "setup" | "mcp" | "diagnostics" | "activity" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -84,9 +84,34 @@ export interface DoctorReport {
 }
 
 export interface OperationState {
+  instanceId?: string;
   name: string;
   status: "running" | "completed" | "failed";
   message: string;
+}
+
+export interface InstanceSnapshot {
+  id: string;
+  name: string;
+  port: number;
+  coreHome: string;
+  browserPartition: string;
+  enabled: boolean;
+  createdAt: string;
+  initialized: boolean;
+  configured: boolean;
+  browser: BrowserState | null;
+  operation: OperationState | null;
+  state: LauncherState | null;
+}
+
+export interface InstanceManagerResult {
+  selectedInstanceId: string;
+  instances: InstanceSnapshot[];
+  instance?: InstanceSnapshot;
+  runtime?: unknown;
+  cockpit?: { ok?: boolean; message?: string; [key: string]: unknown };
+  retainedDataPath?: string | null;
 }
 
 export type UpdateState =
@@ -101,6 +126,8 @@ export interface LauncherSnapshot {
     codexHome: string;
     userData: string;
   };
+  selectedInstanceId: string;
+  instances: InstanceSnapshot[];
   state: LauncherState;
   browser: BrowserState | null;
   connectorName: string;
@@ -124,6 +151,14 @@ export interface LauncherSnapshot {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  createInstance(input?: { name?: string }): Promise<InstanceManagerResult>;
+  selectInstance(instanceId: string): Promise<InstanceManagerResult>;
+  renameInstance(instanceId: string, name: string): Promise<InstanceManagerResult>;
+  startInstance(instanceId: string): Promise<InstanceManagerResult>;
+  stopInstance(instanceId: string): Promise<InstanceManagerResult>;
+  restartInstance(instanceId: string): Promise<InstanceManagerResult>;
+  removeInstance(instanceId: string): Promise<InstanceManagerResult>;
+  syncCockpitPool(): Promise<InstanceManagerResult>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
@@ -178,6 +213,8 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  onInstancesChanged(listener: (state: { selectedInstanceId: string; instances: InstanceSnapshot[] }) => void): () => void;
+  onInstanceBrowserState(listener: (event: { instanceId: string; state: BrowserState }) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;

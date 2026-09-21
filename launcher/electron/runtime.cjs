@@ -857,6 +857,29 @@ class RuntimeHost {
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
 
+  async syncCockpitPool(instances) {
+    this.assertProductionProfile("Cockpit instance pool synchronization");
+    if (!Array.isArray(instances) || instances.length === 0) {
+      throw new Error("Cockpit instance pool requires at least one instance");
+    }
+    const result = await this.run("cockpit-sync", ["cockpit", "sync", "--instances-json", JSON.stringify(instances)], {
+      embedded: true,
+      message: "Synchronizing Cockpit instance pool",
+      successMessage: "Cockpit instance pool synchronized",
+      timeoutMs: 15_000,
+    });
+    let payload;
+    try {
+      payload = JSON.parse(result.stdout);
+    } catch {
+      throw new Error("Cockpit instance pool sync returned invalid JSON");
+    }
+    if (!payload || typeof payload.ok !== "boolean") {
+      throw new Error("Cockpit instance pool sync returned an invalid result");
+    }
+    return payload;
+  }
+
   async restoreBridgeRouteWithinOperation(operationName) {
     if (this.runtimeConfigSnapshot().config?.integrationOwner === "cockpit") {
       return { installed: false, active: false, changed: false, errors: [], skipped: true, reason: "cockpit-provider" };

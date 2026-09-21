@@ -30,7 +30,7 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
-import { syncCockpitIntegration } from "./cockpit";
+import { syncCockpitInstancePool, syncCockpitIntegration, type CockpitWebInstance } from "./cockpit";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -42,7 +42,7 @@ Usage:
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
-  codex-chatgpt-web cockpit sync
+  codex-chatgpt-web cockpit sync [--instances-json JSON]
   codex-chatgpt-web subagents <status|compatibility-v1|native>
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
@@ -424,8 +424,20 @@ async function subagentsCommand(args: string[]): Promise<void> {
  
 async function cockpitCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "sync";
+  const instancesJson = takeOption(args, "--instances-json");
   assertNoArgs(args);
   if (action !== "sync") throw new Error("Cockpit command must be: cockpit sync");
+  if (instancesJson !== undefined) {
+    let instances: CockpitWebInstance[];
+    try {
+      instances = JSON.parse(instancesJson) as CockpitWebInstance[];
+    } catch (error) {
+      throw new Error(`Cockpit instance pool JSON is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!Array.isArray(instances)) throw new Error("Cockpit instance pool must be an array");
+    stdout.write(`${JSON.stringify(syncCockpitInstancePool(instances), null, 2)}\n`);
+    return;
+  }
   const port = existsSync(getConfigPath()) ? loadConfig().port : 17841;
   stdout.write(`${JSON.stringify(syncCockpitIntegration(port), null, 2)}\n`);
 }

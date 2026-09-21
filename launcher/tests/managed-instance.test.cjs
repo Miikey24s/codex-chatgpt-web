@@ -25,7 +25,10 @@ function harness() {
     async close() { this.closed = true; events.push("control:close"); }
   }
   class FakeSupervisor {
-    constructor(options) { this.options = options; this.shutdowns = []; }
+    constructor(options) { this.options = options; this.shutdowns = []; this.starts = 0; this.stops = 0; this.restarts = 0; }
+    async startIfConfigured() { this.starts++; return { status: "ready" }; }
+    async stopForSetup() { this.stops++; return { status: "stopped" }; }
+    async restart() { this.restarts++; return { status: "ready" }; }
     async shutdown(options) { this.shutdowns.push(options); events.push("runtime:shutdown"); }
     cancelBrowserTurn() {}
   }
@@ -73,6 +76,13 @@ test("managed instances own independent runtime browser and control lifecycles",
   assert.equal(b.runtimeSupervisor.options.coreHome, fakeInstance("instance-2", 17842).coreHome);
   assert.equal(a.snapshot().port, 17841);
   assert.equal(b.snapshot().port, 17842);
+
+  assert.deepEqual(await b.startRuntime(), { status: "ready" });
+  assert.deepEqual(await b.stopRuntime(), { status: "stopped" });
+  assert.deepEqual(await b.restartRuntime(), { status: "ready" });
+  assert.equal(b.runtimeSupervisor.starts, 1);
+  assert.equal(b.runtimeSupervisor.stops, 1);
+  assert.equal(b.runtimeSupervisor.restarts, 1);
 
   await b.shutdown();
   assert.deepEqual(second.events.slice(-4), ["runtime:shutdown", "browser:persist", "browser:destroy", "control:close"]);

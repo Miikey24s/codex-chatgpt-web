@@ -8,6 +8,14 @@ function subscription(channel, listener) {
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
   snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  createInstance: (input) => ipcRenderer.invoke("launcher:instance-create", input),
+  selectInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-select", instanceId),
+  renameInstance: (instanceId, name) => ipcRenderer.invoke("launcher:instance-rename", instanceId, name),
+  startInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-start", instanceId),
+  stopInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-stop", instanceId),
+  restartInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-restart", instanceId),
+  removeInstance: (instanceId) => ipcRenderer.invoke("launcher:instance-remove", instanceId),
+  syncCockpitPool: () => ipcRenderer.invoke("launcher:cockpit-pool-sync"),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(
@@ -54,6 +62,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onWindowStateChanged: (listener) => subscription("launcher:window-state-changed", listener),
   onStateChanged: (listener) => subscription("launcher:state-changed", listener),
   onBrowserState: (listener) => subscription("launcher:browser-state", listener),
+  onInstancesChanged: (listener) => subscription("launcher:instances-changed", listener),
+  onInstanceBrowserState: (listener) => subscription("launcher:instance-browser-state", listener),
   onOperation: (listener) => subscription("launcher:operation", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
