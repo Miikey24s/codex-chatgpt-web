@@ -158,3 +158,23 @@ test("instance registry updates mutable metadata and refuses to remove primary",
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("instance registry skips ids whose retained profile directory still exists", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-instance-registry-"));
+  const file = path.join(root, "launcher", "instances.json");
+  try {
+    const store = createInstanceRegistryStore(file, {
+      primaryProfile: fixtureProfile(root),
+      now: () => "2026-09-21T03:00:00.000Z",
+    });
+    const second = store.create({ name: "Work 2" });
+    fs.mkdirSync(second.coreHome, { recursive: true });
+    store.remove(second.id);
+
+    const next = store.create({ name: "Work 3" });
+    assert.equal(next.id, "instance-3");
+    assert.equal(next.port, 17842);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

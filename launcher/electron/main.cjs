@@ -538,6 +538,8 @@ function registerIpc({
   stateStore,
   managerStateStore = stateStore,
   ensureManagedInstance,
+  forgetInstanceState,
+  removeInstanceData,
   selectManagedInstance,
   syncCockpitPool,
 }) {
@@ -666,8 +668,9 @@ function registerIpc({
     }
   });
 
-  handle("launcher:instance-remove", async (_event, instanceId) => {
+  handle("launcher:instance-remove", async (_event, instanceId, options) => {
     if (instanceId === PRIMARY_INSTANCE_ID) throw new Error("Primary instance cannot be removed");
+    const removeData = options?.removeData === true;
     const managed = managedInstances.get(instanceId);
     const wasEnabled = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId)?.enabled === true;
     instanceRegistryStore.update(instanceId, { enabled: false });
@@ -690,7 +693,9 @@ function registerIpc({
       throw error;
     }
     const removed = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId);
+    if (removeData && removed) await removeInstanceData(removed);
     instanceRegistryStore.remove(instanceId);
+    forgetInstanceState?.(instanceId);
     if (managerStateStore.read().selectedInstanceId === instanceId) {
       managerStateStore.update({ selectedInstanceId: PRIMARY_INSTANCE_ID });
       await ensureManagedInstance(PRIMARY_INSTANCE_ID);
@@ -698,7 +703,7 @@ function registerIpc({
     }
     const finalCockpit = await syncCockpitPool();
     publishInstancesChanged();
-    return managerResult({ retainedDataPath: removed?.coreHome ?? null, cockpit: finalCockpit });
+    return managerResult({ retainedDataPath: removeData ? null : removed?.coreHome ?? null, cockpit: finalCockpit });
   });
 
   handle("launcher:cockpit-pool-sync", async () => managerResult({ cockpit: await syncCockpitPool() }));
@@ -1249,6 +1254,7 @@ async function start() {
     }
     return store;
   };
+  const forgetInstanceState = (instanceId) => instanceStateStores.delete(instanceId);
   const stateStore = {
     read() {
       const manager = managerStateStore.read();
@@ -1277,6 +1283,14 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  const removeInstanceData = async (instance) => {
+    const browserSession = session.fromPartition(instance.browserPartition);
+    await browserSession.clearStorageData();
+    await browserSession.clearCache();
+    browserSession.flushStorageData();
+    fs.rmSync(instance.coreHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    logger.info("instance.profile_data_removed", { instanceId: instance.id });
+  };
   logger.info("instance_registry.ready", {
     count: instanceRegistryStore.read().instances.length,
     selectedInstanceId: managerStateStore.read().selectedInstanceId,
@@ -1399,6 +1413,8 @@ async function start() {
     stateStore,
     managerStateStore,
     ensureManagedInstance,
+    forgetInstanceState,
+    removeInstanceData,
     selectManagedInstance,
     syncCockpitPool,
   });

@@ -157,7 +157,7 @@ export interface LauncherApi {
   startInstance(instanceId: string): Promise<InstanceManagerResult>;
   stopInstance(instanceId: string): Promise<InstanceManagerResult>;
   restartInstance(instanceId: string): Promise<InstanceManagerResult>;
-  removeInstance(instanceId: string): Promise<InstanceManagerResult>;
+  removeInstance(instanceId: string, options?: { removeData?: boolean }): Promise<InstanceManagerResult>;
   syncCockpitPool(): Promise<InstanceManagerResult>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;

@@ -381,11 +381,6 @@ function LauncherShell({
   const browserSurfaceActive = surface === "browser"
     && !(compactSidebar && sidebarOpen)
     && !biggerContextRecommendationOpen;
-  const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
-    && browser?.authenticated !== true;
-  const needsSetup = !needsBrowser && !interactionSetupComplete;
-  const mcpOptional = snapshot.state.browserInteractionMode === "automatic"
-    && snapshot.state.mcpSetupComplete !== true;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
@@ -600,38 +595,6 @@ function LauncherShell({
                   label="Instances"
                   onClick={() => navigateSurface("instances")}
                 />
-                <SidebarItem
-                  active={surface === "browser"}
-                  badge={needsBrowser
-                    ? <ActionDot pulse tone="required" />
-                    : browser?.status === "error"
-                      ? <ActionDot tone="error" />
-                      : null}
-                  icon="browser"
-                  label={copy.browser}
-                  onClick={() => navigateSurface("browser")}
-                />
-              </SidebarGroup>
-              <SidebarGroup label={copy.configuration}>
-                <SidebarItem
-                  active={surface === "setup"}
-                  badge={needsSetup ? <ActionDot pulse tone="required" /> : null}
-                  icon="setup"
-                  label={copy.setup}
-                  onClick={() => navigateSurface("setup")}
-                />
-                <SidebarItem
-                  active={surface === "mcp"}
-                  badge={mcpOptional ? <ActionDot tone="optional" /> : null}
-                  icon="mcp"
-                  label="MCP"
-                  onClick={() => {
-                    setMcpTargetMode(null);
-                    navigateSurface("mcp");
-                  }}
-                />
-              </SidebarGroup>
-              <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
               </SidebarGroup>
             </nav>
@@ -722,7 +685,7 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+              <ActivitySurface copy={copy} instances={snapshot.instances} language={language} logs={logs} setError={setError} />
             ) : null}
             {surface === "diagnostics" ? (
               <DiagnosticsSurface copy={copy} language={language} setError={setError} snapshot={snapshot} />
@@ -897,8 +860,11 @@ function InstancesSurface({
 
   const remove = async (instance: InstanceSnapshot) => {
     if (instance.id === "primary" || actionBusy) return;
-    if (!window.confirm(`Remove ${instance.name} from the manager? Its profile data will be kept on disk.`)) return;
-    await run(instance.id, () => api!.removeInstance(instance.id));
+    if (!window.confirm(`Remove ${instance.name} from the manager and stop routing new turns to it?`)) return;
+    const removeData = window.confirm(
+      `Delete ${instance.name}'s local profile data too?\n\nOK deletes its runtime state and ChatGPT browser storage. Cancel keeps the data on disk for manual recovery.`,
+    );
+    await run(instance.id, () => api!.removeInstance(instance.id, { removeData }));
   };
 
   return (
@@ -978,6 +944,7 @@ function InstancesSurface({
             <SecondaryButton icon="browser" onClick={() => openSurface("browser")}>Browser</SecondaryButton>
             <SecondaryButton icon="setup" onClick={() => openSurface("setup")}>Setup</SecondaryButton>
             <SecondaryButton icon="activity" onClick={() => openSurface("diagnostics")}>Diagnostics</SecondaryButton>
+            <SecondaryButton icon="settings" onClick={() => openSurface("settings")}>Settings</SecondaryButton>
             {selected.id !== "primary" ? (
               <button className="instance-remove-button" disabled={actionBusy} onClick={() => void remove(selected)} type="button">Remove</button>
             ) : null}
@@ -1735,34 +1702,49 @@ function McpSurface({
 
 function ActivitySurface({
   copy,
+  instances,
   language,
   logs,
   setError,
 }: {
   copy: Copy;
+  instances: InstanceSnapshot[];
   language: Language;
   logs: LogRecord[];
   setError: (error: string | null) => void;
 }) {
+  const [instanceFilter, setInstanceFilter] = useState("all");
+  const filteredLogs = instanceFilter === "all"
+    ? logs
+    : logs.filter(record => record.detail.instanceId === instanceFilter);
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
-        <SecondaryButton
-          icon="external"
-          onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
-        >
-          {copy.exportSafeLog}
-        </SecondaryButton>
+        <div className="activity-actions">
+          <label className="activity-filter">
+            <span>Instance</span>
+            <select value={instanceFilter} onChange={(event) => setInstanceFilter(event.target.value)}>
+              <option value="all">All instances</option>
+              {instances.map(instance => <option key={instance.id} value={instance.id}>{instance.name}</option>)}
+            </select>
+          </label>
+          <SecondaryButton
+            icon="external"
+            onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
+          >
+            {copy.exportSafeLog}
+          </SecondaryButton>
+        </div>
       </div>
       <div className="activity-table">
-        {logs.length === 0 ? (
+        {filteredLogs.length === 0 ? (
           <div className="surface-empty">
             <Icon name="logs" />
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record, index) => (
+        {[...filteredLogs].reverse().map((record, index) => (
           <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
             <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
             <div>

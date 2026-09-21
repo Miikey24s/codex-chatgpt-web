@@ -5,6 +5,21 @@ const { BrowserControlServer } = require("./control-server.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 
+function scopedLogger(logger, instanceId) {
+  if (!logger || typeof logger !== "object") return logger;
+  const withInstance = (detail) => ({
+    ...(detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {}),
+    instanceId,
+  });
+  return {
+    ...logger,
+    debug: (event, detail) => logger.debug?.(event, withInstance(detail)),
+    info: (event, detail) => logger.info?.(event, withInstance(detail)),
+    warn: (event, detail) => logger.warn?.(event, withInstance(detail)),
+    error: (event, detail) => logger.error?.(event, withInstance(detail)),
+  };
+}
+
 class ManagedInstance {
   constructor({
     app,
@@ -45,7 +60,7 @@ class ManagedInstance {
     this.sourceRoot = sourceRoot;
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
-    this.logger = logger;
+    this.logger = scopedLogger(logger, this.instance.id);
     this.stateStore = stateStore;
     this.sessionForPartition = sessionForPartition;
     this.publishOperation = publishOperation;
@@ -174,4 +189,4 @@ class ManagedInstance {
   }
 }
 
-module.exports = { ManagedInstance };
+module.exports = { ManagedInstance, scopedLogger };

@@ -102,10 +102,11 @@ function managedInstancesRoot(profile) {
   return path.join(path.dirname(primaryHome), `${path.basename(primaryHome)}-instances`);
 }
 
-function nextInstanceNumber(instances) {
+function nextInstanceNumber(instances, rootPath) {
   const used = new Set(instances.map(instance => instance.id));
   for (let number = 2; number < 10_000; number += 1) {
-    if (!used.has(`instance-${number}`)) return number;
+    const id = `instance-${number}`;
+    if (!used.has(id) && !fs.existsSync(path.join(rootPath, id))) return number;
   }
   throw new Error("Instance registry has no available instance ids");
 }
@@ -147,13 +148,14 @@ function createInstanceRegistryStore(filePath, { primaryProfile, now = () => new
       return registry.instances.some(instance => instance.id === instanceId);
     },
     create({ name } = {}) {
-      const number = nextInstanceNumber(registry.instances);
+      const rootPath = managedInstancesRoot(primaryProfile);
+      const number = nextInstanceNumber(registry.instances, rootPath);
       const id = `instance-${number}`;
       const instance = validateInstance({
         id,
         name: typeof name === "string" && name.trim() ? name.trim() : `Instance ${number}`,
         port: nextPort(registry.instances),
-        coreHome: path.join(managedInstancesRoot(primaryProfile), id),
+        coreHome: path.join(rootPath, id),
         browserPartition: `persist:codex-web-gpt-${id}`,
         enabled: false,
         createdAt: now(),

@@ -33,6 +33,40 @@ test("manager IPC exposes instance-scoped lifecycle and pool state to the render
   assert.match(appSource, /api!\.createInstance/);
   assert.match(appSource, /api!\.selectInstance/);
   assert.match(appSource, /api!\.startInstance/);
+  assert.match(appSource, /api!\.removeInstance\(instance\.id, \{ removeData \}\)/);
+  assert.match(appSource, /value=\{instanceFilter\}/);
+  assert.match(appSource, /record\.detail\.instanceId === instanceFilter/);
+  assert.match(managedInstanceSource, /instanceId,/);
+});
+
+test("manager navigation keeps instance tools inside the selected instance detail", () => {
+  const nav = appSource.slice(
+    appSource.indexOf('<nav className="sidebar-nav"'),
+    appSource.indexOf("</nav>", appSource.indexOf('<nav className="sidebar-nav"')),
+  );
+  assert.match(nav, /label="Instances"/);
+  assert.match(nav, /label=\{copy\.activity\}/);
+  assert.doesNotMatch(nav, /label=\{copy\.browser\}/);
+  assert.doesNotMatch(nav, /label=\{copy\.setup\}/);
+  assert.doesNotMatch(nav, /label="MCP"/);
+
+  const detail = appSource.slice(
+    appSource.indexOf('className="instance-detail-tabs"'),
+    appSource.indexOf("</section>", appSource.indexOf('className="instance-detail-tabs"')),
+  );
+  for (const label of ["Browser", "Setup", "Diagnostics", "Settings"]) {
+    assert.match(detail, new RegExp(`>${label}<`));
+  }
+});
+
+test("instance data deletion completes before registry ownership is removed", () => {
+  const start = electronMain.indexOf('handle("launcher:instance-remove"');
+  const end = electronMain.indexOf('handle("launcher:cockpit-pool-sync"', start);
+  const source = electronMain.slice(start, end);
+  const dataRemoval = source.indexOf("await removeInstanceData(removed)");
+  const registryRemoval = source.indexOf("instanceRegistryStore.remove(instanceId)");
+  assert.ok(dataRemoval >= 0);
+  assert.ok(registryRemoval > dataRemoval);
 });
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {

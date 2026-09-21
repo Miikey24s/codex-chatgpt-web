@@ -1948,6 +1948,30 @@ code {
   min-height: 26px;
 }
 
+.activity-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.activity-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.activity-filter select {
+  height: var(--height-control);
+  min-width: 140px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+  padding: 0 28px 0 9px;
+}
+
 .activity-table {
   border-top: 1px solid var(--color-border);
 }

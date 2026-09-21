@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const { ManagedInstance } = require("../electron/managed-instance.cjs");
+const { ManagedInstance, scopedLogger } = require("../electron/managed-instance.cjs");
 
 function fakeInstance(id, port) {
   return {
@@ -110,4 +110,16 @@ test("managed instance forwards operation and browser state with its instance id
   managed.browserHost.options.publishState({ status: "ready" });
   assert.deepEqual(operations, [{ name: "start", status: "running", message: "starting", instanceId: "instance-2" }]);
   assert.deepEqual(browsers, [["instance-2", { status: "ready" }]]);
+});
+
+test("managed instance logger tags child lifecycle records with the instance id", () => {
+  const records = [];
+  const logger = scopedLogger({
+    info: (event, detail) => records.push({ event, detail }),
+  }, "instance-2");
+  logger.info("runtime.ready", { status: "ready" });
+  assert.deepEqual(records, [{
+    event: "runtime.ready",
+    detail: { status: "ready", instanceId: "instance-2" },
+  }]);
 });
