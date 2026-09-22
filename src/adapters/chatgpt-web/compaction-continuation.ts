@@ -54,13 +54,16 @@ export function isAcceptedCompactionContinuation(
     if (!item || typeof item !== "object") continue;
     if (["compaction", "compaction_summary", "context_compaction"].includes(String(item.type))) {
       const summary = typeof item.encrypted_content === "string" ? decodeCompactionSummary(item.encrypted_content) : null;
-      return summary !== null && acceptsSummary(key, checkpoint, summary);
+      if (summary !== null && acceptsSummary(key, checkpoint, summary)) return true;
     }
     if (item.role !== "user") continue;
     const text = typeof item.content === "string" ? item.content : Array.isArray(item.content)
       ? item.content.map(part => part?.text ?? "").join("\n") : "";
     if (isReadableCompactionSummaryText(text)) {
-      return acceptsSummary(key, checkpoint, text.slice(SUMMARY_PREFIX.length + 1));
+      const summaryText = text.startsWith(`${SUMMARY_PREFIX}\n\n`)
+        ? text.slice(SUMMARY_PREFIX.length + 2)
+        : text.slice(SUMMARY_PREFIX.length + 1);
+      if (acceptsSummary(key, checkpoint, summaryText)) return true;
     }
   }
   return false;

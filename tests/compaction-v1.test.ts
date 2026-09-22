@@ -5,6 +5,11 @@ import {
   isReadableCompactionSummaryText,
   SUMMARY_PREFIX,
 } from "../src/responses/compaction";
+import {
+  isAcceptedCompactionContinuation,
+  rememberCompactionContinuation,
+} from "../src/adapters/chatgpt-web/compaction-continuation";
+import type { CodexParsedRequest } from "../src/types";
 
 test("recognizes both Codex v1 and transparent v2 readable compaction summaries", () => {
   expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}\nv1 summary`)).toBe(true);
@@ -61,4 +66,85 @@ test("v1 compaction drops persisted one-pixel image sentinels", () => {
 
   expect(JSON.stringify(output)).not.toContain(placeholder);
   expect(JSON.stringify(output)).toContain("data:image/png;base64,real-image");
+});
+
+test("accepts compaction continuation in both single-newline v1 and double-newline v2 format", () => {
+  const summary = "Verified working directory and completed unit test suite.";
+  const parsed = {
+    modelId: "gpt-5.6-sol",
+    options: { reasoning: "high" },
+    _compactionRequest: true,
+    _rawBody: { input: [] },
+  } as unknown as CodexParsedRequest;
+  const identity = { threadId: "thread_test_cont", turnId: "turn_test_cont" };
+  const source = { turnId: "turn_source_0", content: "Original task prompt" };
+
+  rememberCompactionContinuation(parsed, identity, [source], summary);
+
+  const continuationV1 = {
+    ...parsed,
+    _compactionRequest: false,
+    _rawBody: {
+      input: [
+        { role: "user", content: `${SUMMARY_PREFIX}\n${summary}` },
+      ],
+    },
+  } as unknown as CodexParsedRequest;
+  expect(isAcceptedCompactionContinuation(continuationV1, identity, source)).toBe(true);
+
+  const continuationV2 = {
+    ...parsed,
+    _compactionRequest: false,
+    _rawBody: {
+      input: [
+        { role: "user", content: `${SUMMARY_PREFIX}\n\n${summary}` },
+      ],
+    },
+  } as unknown as CodexParsedRequest;
+  expect(isAcceptedCompactionContinuation(continuationV2, identity, source)).toBe(true);
+
+  // Summary hash mismatch is rejected
+  const alteredSummary = {
+    ...continuationV2,
+    _rawBody: {
+      input: [{ role: "user", content: `${SUMMARY_PREFIX}\n\nAltered summary content` }],
+    },
+  } as unknown as CodexParsedRequest;
+  expect(isAcceptedCompactionContinuation(alteredSummary, identity, source)).toBe(false);
+
+  // Source revision mismatch is rejected
+  const alteredSourceContent = { turnId: "turn_source_0", content: "Tampered source prompt" };
+  expect(isAcceptedCompactionContinuation(continuationV2, identity, alteredSourceContent)).toBe(false);
+
+  const alteredSourceTurn = { turnId: "turn_source_tampered", content: "Original task prompt" };
+  expect(isAcceptedCompactionContinuation(continuationV2, identity, alteredSourceTurn)).toBe(false);
+
+  // Scope mismatch (thread, turn, model, reasoning) fails closed
+  expect(isAcceptedCompactionContinuation(continuationV2, { ...identity, threadId: "thread_tampered" }, source)).toBe(false);
+  expect(isAcceptedCompactionContinuation(continuationV2, { ...identity, turnId: "turn_tampered" }, source)).toBe(false);
+  expect(isAcceptedCompactionContinuation({ ...continuationV2, modelId: "gpt-5.6-other" } as unknown as CodexParsedRequest, identity, source)).toBe(false);
+  expect(isAcceptedCompactionContinuation({ ...continuationV2, options: { reasoning: "low" } } as unknown as CodexParsedRequest, identity, source)).toBe(false);
+
+  // Candidate scanning does not terminate early on non-matching candidates
+  const candidateBeforeValid = {
+    ...continuationV2,
+    _rawBody: {
+      input: [
+        { role: "user", content: `${SUMMARY_PREFIX}\n\nStale summary from previous turn` },
+        { role: "user", content: `${SUMMARY_PREFIX}\n\n${summary}` },
+      ],
+    },
+  } as unknown as CodexParsedRequest;
+  expect(isAcceptedCompactionContinuation(candidateBeforeValid, identity, source)).toBe(true);
+
+  const candidateAfterValid = {
+    ...continuationV2,
+    _rawBody: {
+      input: [
+        { role: "user", content: `${SUMMARY_PREFIX}\n\n${summary}` },
+        { role: "user", content: `${SUMMARY_PREFIX}\n\nStale summary from previous turn` },
+      ],
+    },
+  } as unknown as CodexParsedRequest;
+  expect(isAcceptedCompactionContinuation(candidateAfterValid, identity, source)).toBe(true);
 });

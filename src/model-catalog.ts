@@ -26,6 +26,8 @@ export function buildCockpitProviderModelCatalog(config: AppConfig): JsonObject 
       description: route.description,
       context_window: limits.contextWindow,
       max_context_window: limits.contextWindow,
+      effective_context_window_percent: limits.effectiveContextWindowPercent,
+      auto_compact_token_limit: limits.autoCompactTokenLimit,
       input_modalities: route.interactionMode === "manual" ? ["text"] : ["text", "image"],
       capabilities: [
         "reasoning",

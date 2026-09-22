@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
+  availableChatGptWebModelRoutes,
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
+import { buildCockpitProviderModelCatalog } from "../src/model-catalog";
 import { modelsRequest } from "../src/server";
 
 test("proxies official /models auth and query, then appends the fixed ChatGPT Web models", async () => {
@@ -178,4 +180,62 @@ test("ChatGPT-only native catalog rows do not turn model discovery into a 502", 
     .toHaveLength(3);
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/"))
     .every(model => model.supported_in_api === true)).toBe(true);
+});
+
+test("serves Cockpit-owned /models catalog with exact context limits for standard and bigger context", async () => {
+  for (const biggerContext of [false, true]) {
+    for (const proAvailable of [false, true]) {
+      for (const extraHighAvailable of [false, true]) {
+        const config = defaultConfig("full");
+        config.integrationOwner = "cockpit";
+        config.proAvailable = proAvailable;
+        config.extraHighAvailable = extraHighAvailable;
+        config.experimentalBiggerContext = biggerContext;
+
+        const request = new Request("http://127.0.0.1:17841/v1/models");
+        const response = await modelsRequest(request, config);
+        expect(response.status).toBe(200);
+
+        const body = await response.json() as {
+          object: string;
+          data: Array<{
+            id: string;
+            object: string;
+            name: string;
+            display_name: string;
+            context_window: number;
+            max_context_window: number;
+            effective_context_window_percent: number;
+            auto_compact_token_limit: number;
+            supports_tools: boolean;
+            supports_reasoning: boolean;
+            supports_compact: boolean;
+            reasoning_efforts: string[];
+            default_reasoning_effort: string;
+          }>;
+        };
+
+        expect(body.object).toBe("list");
+        const routes = availableChatGptWebModelRoutes(config);
+        expect(body.data.length).toBe(routes.length);
+
+        for (const route of routes) {
+          const model = body.data.find(m => m.id === route.slug);
+          expect(model).toBeDefined();
+          const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+          expect(model!.context_window).toBe(limits.contextWindow);
+          expect(model!.max_context_window).toBe(limits.contextWindow);
+          expect(model!.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
+          expect(model!.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
+          expect(model!.supports_tools).toBe(true);
+          expect(model!.supports_reasoning).toBe(true);
+          expect(model!.supports_compact).toBe(true);
+          expect(model!.reasoning_efforts).toEqual([route.codexEffort]);
+          expect(model!.default_reasoning_effort).toBe(route.codexEffort);
+        }
+
+        expect(body).toEqual(buildCockpitProviderModelCatalog(config) as typeof body);
+      }
+    }
+  }
 });

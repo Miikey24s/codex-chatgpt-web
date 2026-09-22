@@ -226,6 +226,128 @@ for (const format of ["v1", "v2"] as const) test(`${format} pre-turn compaction 
   expect(starts).toBe(2);
 });
 
+test("production-shaped continuation handoff accepts both v1 and transparent v2 summaries and fails closed on alterations", async () => {
+  const config = defaultConfig("full");
+  const threadId = "thread_prod_continuation";
+  const turnId = "turn_prod_continuation";
+  const metadata = { thread_id: threadId, turn_id: turnId };
+  const source = {
+    type: "message",
+    role: "user",
+    id: "msg_source_handoff",
+    content: [{ type: "input_text", text: "Production task to be compacted and continued" }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_before_handoff" },
+  };
+  const original = {
+    model,
+    stream: false,
+    input: [source],
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+  };
+
+  const compact = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({ ...original, input: [source, { type: "compaction_trigger" }] }),
+  }), config, compactionAdapterFactory());
+  expect(compact.status).toBe(200);
+
+  let continuationsExecuted = 0;
+  const continuationFactory = (): ProviderAdapter => ({
+    name: "native-post-compaction-continuation-verifier",
+    async runTurn(parsed, _incoming, emit) {
+      continuationsExecuted += 1;
+      expect(extractChatGptTurnIdentity(parsed).turnId).toBe(turnId);
+      expect(extractChatGptTurnUserRevision(parsed)).toEqual(source.content);
+      emit({ type: "text_delta", text: "Turn after compaction succeeded", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  });
+  const send = (body: unknown) => responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }), config, continuationFactory);
+
+  // v1 single-newline continuation accepted
+  const v1SummaryMessage = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }],
+  };
+  const resV1 = await send({ ...original, input: [source, v1SummaryMessage] });
+  expect(resV1.status).toBe(200);
+  expect((await resV1.json() as { status: string }).status).toBe("completed");
+
+  // transparent v2 double-newline continuation accepted
+  const v2SummaryMessage = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n\n${summary}` }],
+  };
+  const resV2 = await send({ ...original, input: [source, v2SummaryMessage] });
+  expect(resV2.status).toBe(200);
+  expect((await resV2.json() as { status: string }).status).toBe("completed");
+
+  // Unmatched candidates before or after valid candidate do not cause early exit
+  const staleSummaryMessage = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n\nStale summary text with mismatched hash` }],
+  };
+  const resPrecedingStale = await send({
+    ...original,
+    input: [source, staleSummaryMessage, v2SummaryMessage],
+  });
+  expect(resPrecedingStale.status).toBe(200);
+
+  const resSucceedingStale = await send({
+    ...original,
+    input: [source, v2SummaryMessage, staleSummaryMessage],
+  });
+  expect(resSucceedingStale.status).toBe(200);
+
+  // Mismatched summary rejected
+  const resBadSummary = await send({
+    ...original,
+    input: [source, staleSummaryMessage],
+  });
+  expect(resBadSummary.status).toBe(400);
+
+  // Mismatched source content rejected
+  const tamperedSource = {
+    ...source,
+    content: [{ type: "input_text", text: "Altered source prompt" }],
+  };
+  const resBadSource = await send({
+    ...original,
+    input: [tamperedSource, v2SummaryMessage],
+  });
+  expect(resBadSource.status).toBe(400);
+
+  // Scope alterations fail closed (thread, turn, model)
+  const resBadThread = await send({
+    ...original,
+    input: [source, v2SummaryMessage],
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, thread_id: "other_thread" }) },
+  });
+  expect(resBadThread.status).toBe(400);
+
+  const resBadTurn = await send({
+    ...original,
+    input: [source, v2SummaryMessage],
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ ...metadata, turn_id: "other_turn" }) },
+  });
+  expect(resBadTurn.status).toBe(400);
+
+  const resBadModel = await send({
+    ...original,
+    input: [source, v2SummaryMessage],
+    model: "chatgpt-web/medium",
+  });
+  expect(resBadModel.status).toBe(400);
+
+  expect(continuationsExecuted).toBe(4);
+});
+
 test("v1 goal compaction authorizes the human instruction that native Codex retains", async () => {
   const config = defaultConfig("full");
   const metadata = { thread_id: "thread_goal_compaction", turn_id: "turn_goal_continuation" };
