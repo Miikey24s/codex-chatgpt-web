@@ -567,7 +567,13 @@ export class ChatGptTurnSessions {
       ));
       if (activeOwner) {
         const [ownedKey, ownedSession] = activeOwner;
-        if (ownedSession.isActive() && instruction && ownedSession.instruction
+        // A different native Codex turn is queued work in the same thread, not steering of the
+        // browser response that is already in flight. Only a revision inside the same native turn
+        // may preempt that response. Explicitly aborted turns are retired by the caller first.
+        const isDistinctNativeTurn = nativeTurnId !== undefined
+          && ownedSession.nativeTurnId !== undefined
+          && nativeTurnId !== ownedSession.nativeTurnId;
+        if (!isDistinctNativeTurn && ownedSession.isActive() && instruction && ownedSession.instruction
           && instruction.current !== ownedSession.instruction) {
           if (!instruction.predecessors.has(ownedSession.instruction)) throw chatGptTurnSupersededError();
           // Native steering can return the old tool result and a new instruction in one request.

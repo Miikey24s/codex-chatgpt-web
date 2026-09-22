@@ -903,6 +903,58 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
+  test("queues a distinct native turn behind an active browser instead of superseding it", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let finishBrowser!: (answer: string) => void;
+    const browser = new Promise<string>(resolve => { finishBrowser = resolve; });
+    let settlePhysical!: () => void;
+    const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
+    const cancellations: Error[] = [];
+    const first = sessions.getOrCreate("old-turn", () => ({
+      mode: "read-only",
+      browser,
+      physicalSettlement,
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: reason => { if (reason) cancellations.push(reason); },
+    }), "old-trace", "shared-thread", "old-native-turn", "native-thread", "old-instruction");
+
+    let replacements = 0;
+    const replacement = sessions.getOrCreateAfterOwnerRetirement(
+      "new-turn",
+      "shared-thread",
+      () => {
+        replacements += 1;
+        return {
+          mode: "read-only" as const,
+          browser: Promise.resolve("replacement"),
+          physicalSettlement: Promise.resolve(),
+          trace: new ChatGptTraceFeed(),
+          text: new ChatGptTextFeed(),
+          cancel: () => {},
+        };
+      },
+      "new-trace",
+      undefined,
+      "new-native-turn",
+      "native-thread",
+      { current: "new-instruction", predecessors: new Set(["old-instruction"]) },
+    );
+    await Bun.sleep(0);
+    const cancellationsBeforeCompletion = cancellations.length;
+    const replacementsBeforeCompletion = replacements;
+
+    finishBrowser("done");
+    await first.browserOutcome;
+    settlePhysical();
+    expect((await replacement).traceId).toBe("new-trace");
+    expect(cancellationsBeforeCompletion).toBe(0);
+    expect(replacementsBeforeCompletion).toBe(0);
+    expect(cancellations).toHaveLength(0);
+    expect(replacements).toBe(1);
+    sessions.clear();
+  });
+
   test("steering retires a browser waiting for an old tool result and rejects late older requests", async () => {
     const sessions = new ChatGptTurnSessions();
     const original = rawWireRequest(environmentXml);
