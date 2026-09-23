@@ -2613,8 +2613,8 @@ export class ChatGptBrowserWorker {
         });
       } catch (error) {
         // Chromium reports ERR_ABORTED when a navigation is superseded by another navigation.
-        // The launcher can legitimately race this goto while handing the owned ChatGPT surface to
-        // Playwright. Continue only for that one error; the authenticated Temporary Chat
+        // A browser navigation handoff can race this goto without closing the owned surface.
+        // Continue only for that one error; the authenticated Temporary Chat
         // postconditions below remain authoritative and fail closed if the replacement navigation
         // landed anywhere else or never produced a usable document.
         if (!isSupersededBrowserNavigationError(error)) throw error;

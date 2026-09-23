@@ -1272,6 +1272,24 @@ test("temporary chat preparation still fails on a real navigation error", async 
   }, page)).rejects.toThrow("ERR_FAILED");
 });
 
+test("temporary chat preparation fails closed when an aborted navigation leaves the wrong surface", async () => {
+  const page = {
+    url: () => "data:text/html,launcher-idle",
+    goto: async (url: string) => { throw new Error(`page.goto: net::ERR_ABORTED at ${url}`); },
+    locator: () => ({
+      filter() { return this; },
+      count: async () => 0,
+    }),
+  };
+  const prepareTemporaryChatSurface = (ChatGptBrowserWorker.prototype as unknown as {
+    prepareTemporaryChatSurface(page: unknown): Promise<unknown>;
+  }).prepareTemporaryChatSurface;
+
+  await expect(prepareTemporaryChatSurface.call({
+    activeComposer: async () => { throw new Error("no composer on launcher idle surface"); },
+  }, page)).rejects.toThrow("Temporary Chat surface is unavailable");
+});
+
 test("compaction prompt attachment retries once only before submission evidence", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
     attachPromptWithCompactionRetry(
