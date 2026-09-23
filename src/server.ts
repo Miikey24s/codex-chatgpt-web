@@ -15,7 +15,11 @@ import {
   extractCodexTurnIdentityFromBody,
   extractChatGptCompactionSourceRevision,
 } from "./adapters/chatgpt-web/environment";
-import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import {
+  compactionDiagnosticRequestId,
+  emitCompactionDiagnostic,
+  rememberCompactionContinuation,
+} from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -594,6 +598,16 @@ export async function responseRequest(
     }
     if (response.status !== "completed") return;
     const identity = extractChatGptTurnIdentity(parsed);
+    emitCompactionDiagnostic({
+      event: "compaction_response_completed",
+      requestId: compactionDiagnosticRequestId(parsed),
+      threadId: identity.threadId ?? null,
+      turnId: identity.turnId ?? null,
+      modelId: parsed.modelId,
+      reasoning: parsed.options.reasoning ?? null,
+      responseId: typeof response.id === "string" ? response.id : null,
+      outputItemCount: Array.isArray(response.output) ? response.output.length : 0,
+    });
     if (!identity.threadId || !identity.turnId || !Array.isArray(response.output) || response.output.length !== 1) return;
     const item = response.output[0];
     if (item?.type !== "compaction" || typeof item.encrypted_content !== "string") return;
@@ -624,6 +638,19 @@ export async function responseRequest(
     delete parsed.options.toolChoice;
     delete parsed.options.parallelToolCalls;
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
+    // Diagnostic: prove the v2 compaction trigger reached the proxy and was accepted for execution.
+    const compactionIdentity = extractChatGptTurnIdentity(parsed);
+    const compactionBody = parsed._rawBody as { input?: unknown[] };
+    emitCompactionDiagnostic({
+      event: "compaction_request_received",
+      requestId: compactionDiagnosticRequestId(parsed),
+      threadId: compactionIdentity.threadId ?? null,
+      turnId: compactionIdentity.turnId ?? null,
+      modelId: parsed.modelId,
+      reasoning: parsed.options.reasoning ?? null,
+      requestKind: "v2_trigger",
+      inputItemCount: Array.isArray(compactionBody.input) ? compactionBody.input.length : 0,
+    });
   }
 
   const provider = providerConfig(config);
@@ -785,6 +812,24 @@ export async function compactRequest(
     );
   }
   const input = Array.isArray(raw.input) ? raw.input : [];
+  // Diagnostic: prove the v1 compact endpoint was entered with a valid model and identity.
+  const v1CompactIdentity = extractCodexTurnIdentityFromBody(raw);
+  const rawReasoning = raw.reasoning;
+  const v1Reasoning = typeof rawReasoning === "string"
+    ? rawReasoning
+    : rawReasoning && typeof rawReasoning === "object" && !Array.isArray(rawReasoning)
+      && typeof (rawReasoning as { effort?: unknown }).effort === "string"
+      ? (rawReasoning as { effort: string }).effort
+      : null;
+  emitCompactionDiagnostic({
+    event: "compaction_request_received",
+    threadId: v1CompactIdentity.threadId ?? null,
+    turnId: v1CompactIdentity.turnId ?? null,
+    modelId: raw.model,
+    reasoning: v1Reasoning,
+    requestKind: "v1_compact_endpoint",
+    inputItemCount: input.length,
+  });
   const headers = new Headers(req.headers);
   headers.set("content-type", "application/json");
   const internal = new Request("http://127.0.0.1/v1/responses", {

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary, encodeCompactionSummary } from "../src/responses/compaction";
@@ -6,9 +6,14 @@ import { compactRequest, responseRequest as respond } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 import { extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
 import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { setCompactionDiagnosticsEmitter } from "../src/adapters/chatgpt-web/compaction-continuation";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
+
+afterEach(() => {
+  setCompactionDiagnosticsEmitter(undefined);
+});
 
 // These fixtures test checkpoint authorization, not persisted previous_response_id storage.
 const responseRequest: typeof respond = (request, config, factory, options) =>
@@ -159,6 +164,47 @@ test("compaction identity accepts a historical source message from the pre-compa
   }));
 
   expect(response.status).toBe(200);
+});
+
+test("emits correlated compaction request and checkpoint diagnostics without prompt text", async () => {
+  const events: Record<string, unknown>[] = [];
+  setCompactionDiagnosticsEmitter(event => events.push(event));
+  const metadata = { thread_id: "thread_compaction_diag", turn_id: "turn_compaction_diag" };
+  const sourceText = "Private source instruction for compaction diagnostics";
+  const source = {
+    type: "message",
+    role: "user",
+    id: "msg_compaction_diag_source",
+    content: [{ type: "input_text", text: sourceText }],
+    internal_chat_message_metadata_passthrough: { turn_id: "turn_before_compaction_diag" },
+  };
+  const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({
+      model,
+      stream: false,
+      input: [source, { type: "compaction_trigger" }],
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+    }),
+  }), defaultConfig("full"), compactionAdapterFactory());
+
+  expect(response.status).toBe(200);
+  const requestEvent = events.find(event => event.event === "compaction_request_received");
+  const completedEvent = events.find(event => event.event === "compaction_response_completed");
+  const checkpointEvent = events.find(event => event.event === "compaction_checkpoint_remembered");
+  expect(requestEvent).toBeDefined();
+  expect(completedEvent).toBeDefined();
+  expect(checkpointEvent).toBeDefined();
+  expect(requestEvent!.requestKind).toBe("v2_trigger");
+  expect(requestEvent!.requestId).toBe(completedEvent!.requestId);
+  expect(requestEvent!.requestId).toBe(checkpointEvent!.requestId);
+  expect(requestEvent!.threadId).toBe(metadata.thread_id);
+  expect(requestEvent!.turnId).toBe(metadata.turn_id);
+  expect(typeof checkpointEvent!.checkpointId).toBe("string");
+  expect(typeof checkpointEvent!.summaryHash).toBe("string");
+  expect(completedEvent!.outputItemCount).toBe(1);
+  expect(JSON.stringify(events)).not.toContain(sourceText);
+  expect(JSON.stringify(events)).not.toContain(summary);
 });
 
 for (const format of ["v1", "v2"] as const) test(`${format} pre-turn compaction authorizes only its exact native continuation`, async () => {
