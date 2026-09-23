@@ -412,6 +412,8 @@ test("tunnel health diagnostics preserve the machine-readable readiness state", 
       state: "stopped",
       processRunning: false,
       healthy: false,
+      classification: "stale_alias",
+      liveAdmin: false,
       absent: false,
       statusKnown: true,
       detail: "state=stopped; process_running=false; healthy=false; ready=false; classification=stale_alias; live_admin=false; pid=missing",
@@ -491,6 +493,8 @@ test("tunnel readiness preserves a native managed process identity when one is r
       state: "ready",
       processRunning: true,
       healthy: true,
+      classification: "active_runtime",
+      liveAdmin: true,
       absent: false,
       statusKnown: true,
       detail: "state=ready; process_running=true; healthy=true; ready=true; classification=active_runtime; live_admin=true; pid=123456779",
@@ -746,6 +750,53 @@ test("managed startup fails immediately when native status reports a stopped run
       supervisor.waitForTunnel({ tunnel: {} }, 120_000),
       /stopped during startup/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("managed startup tolerates valid-profile stopped state while native runtime registers", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-registering-start-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  let reads = 0;
+  supervisor.readTunnelHealth = async () => {
+    reads += 1;
+    if (reads === 1) {
+      return {
+        ready: false,
+        pid: null,
+        state: "stopped",
+        processRunning: false,
+        healthy: false,
+        classification: "valid_profile",
+        liveAdmin: false,
+        absent: false,
+        detail: "state=stopped; process_running=false; classification=valid_profile; live_admin=false; pid=missing",
+      };
+    }
+    return {
+      ready: true,
+      pid: 123_456_789,
+      state: "ready",
+      processRunning: true,
+      healthy: true,
+      classification: "active_runtime",
+      liveAdmin: true,
+      absent: false,
+      detail: "state=ready; process_running=true; classification=active_runtime; live_admin=true; pid=123456789",
+    };
+  };
+  try {
+    const health = await supervisor.waitForTunnel({ tunnel: {} }, 5_000);
+    assert.equal(health.ready, true);
+    assert.equal(reads, 2);
+    assert.equal(supervisor.tunnel?.pid, 123_456_789);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

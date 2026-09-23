@@ -23,6 +23,7 @@ const DRAIN_IDLE_TIMEOUT_MS = 15_000;
 const DRAIN_POLL_INTERVAL_MS = 100;
 const TUNNEL_START_TIMEOUT_MS = 120_000;
 const TUNNEL_HEALTH_POLL_INTERVAL_MS = 1_000;
+const TUNNEL_STOPPED_STARTUP_GRACE_MS = 3_000;
 const TUNNEL_MONITOR_INTERVAL_MS = 10_000;
 const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
@@ -682,6 +683,8 @@ class RuntimeSupervisor {
         state: runtimeState,
         processRunning,
         healthy,
+        classification: entry.classification,
+        liveAdmin: liveRuntime.found === true,
         absent: false,
         statusKnown: true,
         detail: redactText(detail).slice(0, 2_000),
@@ -935,6 +938,7 @@ class RuntimeSupervisor {
     operationName = "runtime-start",
   ) {
     const deadline = Date.now() + timeoutMs;
+    let stoppedStartupObservedAt = null;
     let lastDetail = "tunnel status has not been observed";
     let lastPublishedDetail;
     while (Date.now() < deadline) {
@@ -959,7 +963,18 @@ class RuntimeSupervisor {
         return health;
       }
       if (tunnelRuntimeStopped(health)) {
-        throw new Error(`Tunnel managed runtime stopped during startup: ${health.detail}`);
+        const awaitingNativeRegistration = health.absent !== true
+          && health.classification === "valid_profile"
+          && health.liveAdmin === false;
+        if (!awaitingNativeRegistration) {
+          throw new Error(`Tunnel managed runtime stopped during startup: ${health.detail}`);
+        }
+        stoppedStartupObservedAt ??= Date.now();
+        if (Date.now() - stoppedStartupObservedAt >= TUNNEL_STOPPED_STARTUP_GRACE_MS) {
+          throw new Error(`Tunnel managed runtime stopped during startup: ${health.detail}`);
+        }
+      } else {
+        stoppedStartupObservedAt = null;
       }
       lastDetail = health.detail;
       if (lastDetail !== lastPublishedDetail) {
