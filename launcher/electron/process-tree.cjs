@@ -128,6 +128,78 @@ function tunnelProcessRunning(pid) {
   return TUNNEL_EXECUTABLE_NAMES.has(image);
 }
 
+function terminateProcessesInDirectory(dirPath, { excludePids = [process.pid] } = {}) {
+  if (!dirPath || typeof dirPath !== "string") return [];
+  const normalizedTarget = path.resolve(dirPath).toLowerCase();
+  const terminatedPids = [];
+  const excluded = new Set(excludePids.filter(p => Number.isInteger(p) && p > 0));
+  excluded.add(process.pid);
+
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+    const powershell = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const taskkill = path.join(systemRoot, "System32", "taskkill.exe");
+    const escaped = normalizedTarget.replace(/'/g, "''");
+    const script = [
+      `$target = '${escaped}'.ToLower()`,
+      "Get-CimInstance Win32_Process | ForEach-Object {",
+      "  if ($_.ProcessId -ne $PID) {",
+      "    $p = $_.ExecutablePath",
+      "    $c = $_.CommandLine",
+      "    $hit = $false",
+      "    if ($p -and $p.ToLower().StartsWith($target)) { $hit = $true }",
+      "    elseif ($c -and $c.ToLower().Contains($target)) { $hit = $true }",
+      "    if ($hit) { Write-Output $_.ProcessId }",
+      "  }",
+      "}",
+    ].join("\n");
+
+    try {
+      const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 10_000,
+      });
+      if (result.status === 0 && typeof result.stdout === "string") {
+        const pids = result.stdout
+          .split(/\r?\n/)
+          .map(line => Number.parseInt(line.trim(), 10))
+          .filter(pid => Number.isInteger(pid) && pid > 0 && !excluded.has(pid));
+
+        for (const pid of pids) {
+          try {
+            spawnSync(taskkill, ["/PID", String(pid), "/T", "/F"], {
+              stdio: "ignore",
+              windowsHide: true,
+              timeout: 5_000,
+            });
+            terminatedPids.push(pid);
+          } catch {}
+        }
+      }
+    } catch {}
+    return terminatedPids;
+  }
+
+  try {
+    const lsof = spawnSync("lsof", ["+D", dirPath, "-t"], { encoding: "utf8", timeout: 5_000 });
+    if (lsof.status === 0 && typeof lsof.stdout === "string") {
+      const pids = lsof.stdout
+        .split(/\r?\n/)
+        .map(line => Number.parseInt(line.trim(), 10))
+        .filter(pid => Number.isInteger(pid) && pid > 0 && !excluded.has(pid));
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+          terminatedPids.push(pid);
+        } catch {}
+      }
+    }
+  } catch {}
+
+  return terminatedPids;
+}
+
 module.exports = {
   DAEMON_EXECUTABLE_NAMES,
   DETACH_OWNED_CHILD,
@@ -138,5 +210,7 @@ module.exports = {
   processImageName,
   processRunning,
   terminateOwnedProcessTree,
+  terminateProcessesInDirectory,
   tunnelProcessRunning,
 };
+

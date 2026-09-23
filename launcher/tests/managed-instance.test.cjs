@@ -123,3 +123,11 @@ test("managed instance logger tags child lifecycle records with the instance id"
     detail: { status: "ready", instanceId: "instance-2" },
   }]);
 });
+
+test("terminateProcessesInDirectory gracefully handles absent or empty directories", () => {
+  const { terminateProcessesInDirectory } = require("../electron/process-tree.cjs");
+  assert.deepEqual(terminateProcessesInDirectory(""), []);
+  assert.deepEqual(terminateProcessesInDirectory(null), []);
+  assert.deepEqual(terminateProcessesInDirectory(path.resolve("C:/non-existent-path-for-testing-12345")), []);
+});
+

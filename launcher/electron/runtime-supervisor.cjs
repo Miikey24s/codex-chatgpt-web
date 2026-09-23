@@ -11,6 +11,7 @@ const {
   launcherProcessRunning,
   processRunning,
   terminateOwnedProcessTree,
+  terminateProcessesInDirectory,
   tunnelProcessRunning,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
@@ -2087,6 +2088,11 @@ class RuntimeSupervisor {
         await this.stopChild("daemon");
       } catch (error) {
         failures.push(`daemon: ${errorMessage(error)}`);
+      }
+      try {
+        terminateProcessesInDirectory(this.coreHome);
+      } catch (error) {
+        failures.push(`directory: ${errorMessage(error)}`);
       }
       if (failures.length === 0) this.clearState();
       else this.tryWriteState("failed", failures.join("; "));

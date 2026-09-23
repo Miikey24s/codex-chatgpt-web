@@ -259,6 +259,31 @@ export async function selectLauncherPage(
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }
 
+const guardedPages = new WeakSet<Page>();
+const guardedContexts = new WeakSet<BrowserContext>();
+
+export function installDialogGuards(context: BrowserContext, page?: Page): void {
+  const attach = (targetPage: Page) => {
+    if (guardedPages.has(targetPage)) return;
+    guardedPages.add(targetPage);
+    try {
+      targetPage.on("dialog", (dialog) => {
+        void dialog.dismiss().catch(() => {});
+      });
+    } catch {}
+  };
+  try {
+    if (!guardedContexts.has(context)) {
+      guardedContexts.add(context);
+      context.on("page", attach);
+    }
+    for (const existingPage of context.pages()) {
+      attach(existingPage);
+    }
+  } catch {}
+  if (page) attach(page);
+}
+
 export async function connectLauncherBrowserHost(
   descriptorPath: string,
   timeoutMs = 20_000,
@@ -282,6 +307,9 @@ export async function connectLauncherBrowserHost(
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
+    for (const ctx of browser.contexts()) {
+      installDialogGuards(ctx);
+    }
     const { context, page } = await selectLauncherPage(
       browser,
       descriptor,
@@ -289,6 +317,7 @@ export async function connectLauncherBrowserHost(
       surfaceId,
       abortSignal,
     );
+    installDialogGuards(context, page);
     return { descriptor, browser, context, page };
   } catch (error) {
     await browser.close().catch(() => {});

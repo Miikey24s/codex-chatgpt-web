@@ -88,6 +88,37 @@ console.info = diagnostic;
 console.warn = diagnostic;
 console.error = diagnostic;
 
+process.on("unhandledRejection", (reason: unknown) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  if (
+    message.includes("Page.handleJavaScriptDialog") ||
+    message.includes("No dialog is showing") ||
+    message.includes("Target closed") ||
+    message.includes("Target.detachFromTarget") ||
+    message.includes("Session closed")
+  ) {
+    diagnostic("[chatgpt-web-helper] Suppressed transient CDP/dialog unhandled rejection:", message);
+    return;
+  }
+  diagnostic("[chatgpt-web-helper] Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (error: Error) => {
+  const message = error?.message || String(error);
+  if (
+    message.includes("Page.handleJavaScriptDialog") ||
+    message.includes("No dialog is showing") ||
+    message.includes("Target closed") ||
+    message.includes("Target.detachFromTarget") ||
+    message.includes("Session closed")
+  ) {
+    diagnostic("[chatgpt-web-helper] Suppressed transient CDP/dialog uncaught exception:", message);
+    return;
+  }
+  diagnostic("[chatgpt-web-helper] Uncaught exception:", error);
+  process.exit(1);
+});
+
 const abortControllers = new Map<string, AbortController>();
 const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();

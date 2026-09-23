@@ -28,6 +28,7 @@ const {
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { PRIMARY_INSTANCE_ID, createInstanceRegistryStore } = require("./instance-registry.cjs");
+const { terminateProcessesInDirectory } = require("./process-tree.cjs");
 const { ManagedInstance } = require("./managed-instance.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
@@ -684,7 +685,7 @@ function registerIpc({
     try {
       if (managed) {
         await managed.stopRuntime();
-        await managed.shutdown({ cancelActiveTurns: false, force: false });
+        await managed.shutdown({ cancelActiveTurns: true, force: true });
         managedInstances.delete(instanceId);
       }
     } catch (error) {
@@ -695,6 +696,7 @@ function registerIpc({
       throw error;
     }
     const removed = instanceRegistryStore.read().instances.find(instance => instance.id === instanceId);
+    if (removed) terminateProcessesInDirectory(removed.coreHome);
     if (removeData && removed) await removeInstanceData(removed);
     instanceRegistryStore.remove(instanceId);
     forgetInstanceState?.(instanceId);
@@ -1295,12 +1297,87 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  const removeDirectoryWithRetries = async (dirPath, { instanceId, maxRetries = 10, retryDelayMs = 200 } = {}) => {
+    if (!dirPath || !fs.existsSync(dirPath)) return;
+
+    const clearAttributesOnWindows = (target) => {
+      if (process.platform === "win32") {
+        try {
+          const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+          const attrib = path.join(systemRoot, "System32", "attrib.exe");
+          spawnSync(attrib, ["-R", "-S", "-H", path.join(target, "*"), "/S", "/D"], {
+            stdio: "ignore",
+            windowsHide: true,
+            timeout: 5_000,
+          });
+        } catch {}
+      }
+    };
+
+    clearAttributesOnWindows(dirPath);
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (error?.code === "ENOENT" || !fs.existsSync(dirPath)) return;
+
+        if (["EPERM", "EBUSY", "EACCES"].includes(error?.code)) {
+          terminateProcessesInDirectory(dirPath);
+          clearAttributesOnWindows(dirPath);
+        }
+
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+        }
+      }
+    }
+
+    try {
+      const entries = fs.readdirSync(dirPath);
+      for (const entry of entries) {
+        const entryPath = path.join(dirPath, entry);
+        try {
+          fs.rmSync(entryPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        } catch {}
+      }
+      if (fs.readdirSync(dirPath).length === 0) {
+        try {
+          fs.rmdirSync(dirPath);
+          return;
+        } catch {}
+      }
+      const tombstone = `${dirPath}.deleted-${Date.now()}`;
+      fs.renameSync(dirPath, tombstone);
+      logger.warn("instance.directory_renamed_to_tombstone", {
+        instanceId,
+        originalPath: dirPath,
+        tombstonePath: tombstone,
+        error: lastError?.message,
+      });
+      return;
+    } catch {}
+
+    throw lastError || new Error(`Failed to remove directory: ${dirPath}`);
+  };
+
   const removeInstanceData = async (instance) => {
-    const browserSession = session.fromPartition(instance.browserPartition);
-    await browserSession.clearStorageData();
-    await browserSession.clearCache();
-    browserSession.flushStorageData();
-    fs.rmSync(instance.coreHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    terminateProcessesInDirectory(instance.coreHome);
+    try {
+      const browserSession = session.fromPartition(instance.browserPartition);
+      await browserSession.clearStorageData();
+      await browserSession.clearCache();
+      browserSession.flushStorageData();
+    } catch (sessionError) {
+      logger.warn("instance.clear_browser_storage_failed", {
+        instanceId: instance.id,
+        error: sessionError instanceof Error ? sessionError.message : String(sessionError),
+      });
+    }
+    await removeDirectoryWithRetries(instance.coreHome, { instanceId: instance.id });
     logger.info("instance.profile_data_removed", { instanceId: instance.id });
   };
   logger.info("instance_registry.ready", {
