@@ -2748,6 +2748,15 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   expect(fixture.pressed).toEqual([]);
 });
 
+test("terminal model errors are ignored while generation is actively running", async () => {
+  const fixture = dialogPage(
+    "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
+  );
+
+  await expect(throwIfChatGptTerminalErrorAlert(fixture.page, true)).resolves.toBeUndefined();
+  expect(fixture.pressed).toEqual([]);
+});
+
 test("only a size rejection of the current owned browser submission is non-retryable", async () => {
   const frame = {};
   const page = Object.assign(new EventEmitter(), { mainFrame: () => frame });

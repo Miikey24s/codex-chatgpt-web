@@ -856,7 +856,8 @@ export class ChatGptSubmissionRejectionObserver {
   }
 }
 
-export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
+export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope, running = false): Promise<void> {
+  if (running) return;
   if (await scope.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
       "ChatGPT displayed an error for this response. Check the ChatGPT tab for the exact error, then retry the turn.",
@@ -3699,7 +3700,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
-      await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
         const rebound = await this.reconcileAssistantTurnBinding(
@@ -3740,6 +3741,7 @@ export class ChatGptBrowserWorker {
       }
       const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
       const generationActive = running || snapshot.streamingStatusVisible;
+      if (!generationActive) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
         running: generationActive,
@@ -5162,7 +5164,7 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
-        await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
@@ -5255,6 +5257,7 @@ export class ChatGptBrowserWorker {
         const stopButtonVisible = await stop.isVisible().catch(() => false);
         const running = stopButtonVisible || snapshot.streamingStatusVisible;
         if (running) sawRunning = true;
+        if (!running) await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
         if (responseProgressTracker.update({
           responsePresent: snapshot.responsePresent,
           running,
