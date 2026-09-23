@@ -151,6 +151,23 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+export async function readChatGptEffortAvailability(
+  sliderContainer: Locator,
+  state: ChatGptEffortSliderState,
+): Promise<boolean[]> {
+  // Plus exposes a fourth ARIA position for a locked Pro upsell. Only the ticks
+  // carry both attributes; the slider root also has data-locked and is not a choice.
+  const locks = await sliderContainer.evaluate(container => Array.from(
+    container.querySelectorAll("[data-locked][data-selected]"),
+    tick => tick.getAttribute("data-locked"),
+  ));
+  if (locks.length !== state.max - state.min + 1
+    || locks.some(lock => lock !== "true" && lock !== "false")) {
+    throw new Error("ChatGPT effort availability could not be verified from its slider ticks");
+  }
+  return locks.map(lock => lock === "false");
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -236,7 +253,8 @@ export async function detectChatGptAccountCapabilities(
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
     }
-    return { solAvailable: true, extraHighAvailable: state.max - state.min + 1 >= 4, proAvailable: state.max - state.min + 1 >= 5 };
+    const available = await readChatGptEffortAvailability(sliderContainer, state);
+    return { solAvailable: true, extraHighAvailable: available[3] === true, proAvailable: available[4] === true };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

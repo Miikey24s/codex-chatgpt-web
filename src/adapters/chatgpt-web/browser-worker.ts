@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Request, type Response } from "playwright-core";
 import {
   atomicWriteFile,
   CHATGPT_CONNECTOR_NAME,
@@ -61,6 +61,7 @@ import {
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
   parseChatGptEffortSliderState,
+  readChatGptEffortAvailability,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
@@ -78,6 +79,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
+import { assertChatGptModelFamily, selectChatGptModelFamily } from "./model-selection";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
   ChatGptCompactionHandoffAccepted,
@@ -807,6 +809,53 @@ const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
   .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
   .last();
 
+// ChatGPT renders message_length_exceeds_limit as an ordinary response error. Observe only
+// browser-issued submissions from this owned page after Send is activated so an old response,
+// another tab, or a background endpoint cannot classify the current turn.
+export class ChatGptSubmissionRejectionObserver {
+  private page?: Page;
+  private readonly requests = new Set<Request>();
+  private checks: Array<Promise<ChatGptWebAdapterError | undefined>> = [];
+
+  private readonly onRequest = (request: Request): void => {
+    if (!this.page || request.method() !== "POST"
+      || request.url() !== "https://chatgpt.com/backend-api/f/conversation"
+      || request.frame() !== this.page.mainFrame()) return;
+    this.requests.add(request);
+  };
+
+  private readonly onResponse = (response: Response): void => {
+    if (!this.requests.delete(response.request()) || response.status() !== 413
+      || !response.headers()["content-type"]?.includes("application/json")) return;
+    this.checks.push(withChatGptBrowserObservationTimeout(response.json(), 3_000)
+      .then(body => body?.detail?.code === "message_length_exceeds_limit"
+        ? new ChatGptWebAdapterError(
+          "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying.",
+          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        ) : undefined)
+      .catch(() => undefined));
+  };
+
+  begin(page: Page): void {
+    this.dispose();
+    this.checks = [];
+    this.page = page;
+    page.on("request", this.onRequest);
+    page.on("response", this.onResponse);
+  }
+
+  async failure(): Promise<ChatGptWebAdapterError | undefined> {
+    return (await Promise.all(this.checks)).find(error => error !== undefined);
+  }
+
+  dispose(): void {
+    this.page?.off("request", this.onRequest);
+    this.page?.off("response", this.onResponse);
+    this.page = undefined;
+    this.requests.clear();
+  }
+}
+
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
   if (await scope.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
@@ -1193,6 +1242,7 @@ export interface BrowserTurn {
   traceId: string;
   modelId: string;
   reasoning?: string;
+  modelFamily?: "5.6" | "6";
   capabilities: ChatGptWebCapabilities;
   prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   prepareResume?: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
@@ -1229,6 +1279,11 @@ export interface BrowserTurn {
   captureLunaCheckpoint?: boolean;
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
 }
+
+type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
+  modelFamily?: "5.6" | "6";
+  selection?: { url: string; label: string };
+};
 
 interface ChatGptSubmissionBaseline {
   userTurns: Locator;
@@ -2441,7 +2496,8 @@ export class ChatGptBrowserWorker {
     reasoning: string | undefined,
     capabilities: ChatGptWebCapabilities,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
-  ): Promise<ChatGptWebModelMode> {
+    modelFamily?: "5.6" | "6",
+  ): Promise<SelectedChatGptWebModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
@@ -2481,7 +2537,10 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
-    const activation = await activateChatGptEffortMenu(page, currentEffort);
+    let activation = await activateChatGptEffortMenu(page, currentEffort);
+    if (modelFamily) activation = await selectChatGptModelFamily(
+      page, activation, modelFamily, () => activateChatGptEffortMenu(page, currentEffort),
+    );
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
@@ -2510,6 +2569,7 @@ export class ChatGptBrowserWorker {
     } finally {
       waitAbort.abort();
     }
+    const selectionUrl = page.url();
     let sliderState = parseChatGptEffortSliderState(
       await effortSlider.getAttribute("aria-valuemin"),
       await effortSlider.getAttribute("aria-valuemax"),
@@ -2531,6 +2591,15 @@ export class ChatGptBrowserWorker {
         + ` (min=${sliderState.min}; max=${sliderState.max})`
         + proUsageLimitHint,
         detail,
+      );
+    }
+    const available = await readChatGptEffortAvailability(sliderContainer, sliderState)
+      .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error)); });
+    if (!available[uiEffortIndex]) {
+      throw new ChatGptWebAdapterError(
+        `ChatGPT locks the browser option requested for ${mode.displayLabel} behind an upgrade. `
+        + "The message was not sent. Choose an available effort and run Repair Codex setup to refresh the model list.",
+        { status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_locked", retryable: false },
       );
     }
     const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
@@ -2562,9 +2631,76 @@ export class ChatGptBrowserWorker {
         );
       }
     }
+    await settleChatGptUi();
+    const selectedState = parseChatGptEffortSliderState(
+      await effortSlider.getAttribute("aria-valuemin"),
+      await effortSlider.getAttribute("aria-valuemax"),
+      await effortSlider.getAttribute("aria-valuenow"),
+    );
+    if (!selectedState || selectedState.min !== sliderState.min
+      || selectedState.max !== sliderState.max || selectedState.value !== targetValue) {
+      throw chatGptModelControlUnavailableAdapterError("ChatGPT changed its effort range or selection before the menu closed");
+    }
     await captureDiagnostic?.("effort-selected");
     await page.keyboard.press("Escape");
-    return mode;
+    await settleChatGptUi();
+    const selectedMode: SelectedChatGptWebModelMode = {
+      ...mode,
+      ...(modelFamily ? { modelFamily } : {}),
+      selection: { url: selectionUrl, label: (await currentEffort.innerText()).trim() },
+    };
+    await this.assertSelectedEffort(page, selectedMode, false);
+    const confirmation = await activateChatGptEffortMenu(page, currentEffort);
+    await confirmation.slider.waitFor({ state: "attached", timeout: 5_000 });
+    const confirmedState = parseChatGptEffortSliderState(
+      await confirmation.slider.getAttribute("aria-valuemin"),
+      await confirmation.slider.getAttribute("aria-valuemax"),
+      await confirmation.slider.getAttribute("aria-valuenow"),
+    );
+    if (!confirmedState || confirmedState.min !== selectedState.min
+      || confirmedState.max !== selectedState.max || confirmedState.value !== targetValue) {
+      throw chatGptModelControlUnavailableAdapterError("ChatGPT did not persist the requested effort after closing its menu");
+    }
+    if (modelFamily) await assertChatGptModelFamily(confirmation, modelFamily, mode.effort, uiEffortIndex, 1_000);
+    await page.keyboard.press("Escape");
+    await settleChatGptUi();
+    await this.assertSelectedEffort(page, selectedMode, false);
+    await captureDiagnostic?.("effort-selection-confirmed");
+    return selectedMode;
+  }
+
+  private async assertSelectedEffort(
+    page: Page,
+    mode: SelectedChatGptWebModelMode,
+    verifyFamily = true,
+  ): Promise<void> {
+    if (!mode.selection) return;
+    const composer = await this.activeComposer(page);
+    const controls = composer.locator("xpath=ancestor::form[1]")
+      .locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
+    if (page.url() !== mode.selection.url || !mode.selection.label || await controls.count() !== 1) {
+      throw chatGptModelControlUnavailableAdapterError("ChatGPT changed the selected model's browser surface before submission");
+    }
+    const control = controls.first();
+    if ((await control.innerText()).trim() !== mode.selection.label
+      || await control.getAttribute("aria-expanded") !== "false"
+      || !await composer.isEditable()) {
+      throw chatGptModelControlUnavailableAdapterError(
+        "ChatGPT did not retain the selected effort in its ready composer; the message was not submitted",
+      );
+    }
+    if (verifyFamily && mode.modelFamily && mode.uiEffortIndex !== null) {
+      const menu = await activateChatGptEffortMenu(page, control);
+      try {
+        await assertChatGptModelFamily(menu, mode.modelFamily, mode.effort, mode.uiEffortIndex);
+      } finally {
+        await page.keyboard.press("Escape");
+      }
+      if (page.url() !== mode.selection.url || (await control.innerText()).trim() !== mode.selection.label
+        || await control.getAttribute("aria-expanded") !== "false" || !await composer.isEditable()) {
+        throw chatGptModelControlUnavailableAdapterError("ChatGPT changed the model while checking its family before submission");
+      }
+    }
   }
 
   private async activeComposer(
@@ -4469,6 +4605,7 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    const submissionRejection = new ChatGptSubmissionRejectionObserver();
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       // Validate only the selected physical message, not canonical history used for usage estimates.
@@ -4697,6 +4834,7 @@ export class ChatGptBrowserWorker {
           stagingMode.effort,
           browserCapabilities,
           checkpoint => diagnostics.capture(page, checkpoint),
+          turn.modelFamily,
         )
       ));
       await diagnostics.capture(page, "effort-selection-complete");
@@ -4705,6 +4843,21 @@ export class ChatGptBrowserWorker {
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
+          if (index > 0) {
+            mode = await this.runStage(
+              turn.traceId,
+              `multipart_stage_${index + 1}_effort_selection`,
+              browserStageTimeouts.effortSelection,
+              () => this.selectModelAndEffort(
+                page,
+                turn.modelId,
+                stagingMode.effort,
+                browserCapabilities,
+                checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
+                turn.modelFamily,
+              ),
+            );
+          }
           let stageBaseline = await this.captureSubmissionBaseline(page);
           await this.runStage(
             turn.traceId,
@@ -4731,7 +4884,10 @@ export class ChatGptBrowserWorker {
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
-              undefined,
+              { onSendActivated: async () => {
+                await this.assertSelectedEffort(page, mode);
+                submissionRejection.begin(page);
+              } },
               undefined,
               launcherObservationRecovery
                 ? async (...args) => {
@@ -4783,10 +4939,12 @@ export class ChatGptBrowserWorker {
             },
             chatGptSuspensionClock,
           );
+          const stageRejection = await submissionRejection.failure();
+          if (stageRejection) throw stageRejection;
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
-        if (mode.effort !== requestedMode.effort) {
+        if (mode.effort !== requestedMode.effort || turn.modelFamily) {
           mode = await this.runStage(
             turn.traceId,
             "final_part_effort_selection",
@@ -4797,6 +4955,7 @@ export class ChatGptBrowserWorker {
               requestedMode.effort,
               browserCapabilities,
               checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
+              turn.modelFamily,
             ),
           );
           await diagnostics.capture(page, "final-part-effort-selected");
@@ -4855,6 +5014,7 @@ export class ChatGptBrowserWorker {
                 turn.reasoning,
                 turn.capabilities,
                 checkpoint => diagnostics.capture(page, checkpoint),
+                turn.modelFamily,
               );
               submissionBaseline = await this.captureSubmissionBaseline(page);
             },
@@ -4880,7 +5040,14 @@ export class ChatGptBrowserWorker {
           checkpoint => diagnostics.capture(page, checkpoint),
           turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
           turn.externalProgress,
-          turn,
+          {
+            ...turn,
+            onSendActivated: async () => {
+              await this.assertSelectedEffort(page, mode);
+              submissionRejection.begin(page);
+              await turn.onSendActivated?.();
+            },
+          },
           completionTracker,
           launcherObservationRecovery
             ? async (...args) => {
@@ -5194,6 +5361,9 @@ export class ChatGptBrowserWorker {
        }
       }
 
+      const finalRejection = await submissionRejection.failure();
+      if (finalRejection) throw finalRejection;
+
       if (this.context && this.config.browserHost === "managed-chrome") {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
@@ -5205,6 +5375,10 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")
+        && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
+        error = await submissionRejection.failure() ?? error;
+      }
       if (error instanceof DOMException && error.name === "AbortError"
         && turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted) {
         console.info(`[chatgpt-web] browser turn ${turn.traceId} ended after accepted structured compaction handoff`);
@@ -5222,6 +5396,7 @@ export class ChatGptBrowserWorker {
       }
       throw error;
     } finally {
+      submissionRejection.dispose();
       prepared.release();
       if (turnConnection) {
         await turnConnection.close().catch(error => {

@@ -42,7 +42,11 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     sendAttachedPrompt: async (...args: unknown[]) => {
       // Context ingestion cannot mistake tool activity for acknowledgement of a part.
       expect(args[4]).toBe(stage === "send" ? progress : undefined);
-      if (stage !== "send") expect(args[5]).toBeUndefined();
+      if (stage !== "send") {
+        const lifecycle = args[5] as { onSendActivated?: unknown; onSubmitted?: unknown } | undefined;
+        expect(typeof lifecycle?.onSendActivated).toBe("function");
+        expect(lifecycle?.onSubmitted).toBeUndefined();
+      }
       recoveryCallbacks.push(args[7]);
       actions.push("send");
       return "user_turn";
@@ -75,8 +79,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
     );
     expect(actions).toEqual([
       ...(multipart ? [
-        "effort:low",
-        ...Array.from({ length: 5 }, () => ["attach:plain", "send", "observe", "ack"]).flat(),
+        ...Array.from({ length: 5 }, () => ["effort:low", "attach:plain", "send", "observe", "ack"]).flat(),
       ] : []),
       "effort:high",
       tools ? "attach:tools" : "attach:plain", "files", "send", "observe",

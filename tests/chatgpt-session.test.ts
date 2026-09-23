@@ -211,7 +211,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; locked?: boolean[] } = {}) {
   let value = 0;
   const keys: string[] = [];
   const hidden = {
@@ -232,6 +232,8 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   const container = {
     filter() { return this; }, last() { return this; },
     locator: () => slider,
+    evaluate: async () => options.locked?.map(locked => String(locked))
+      ?? Array.from({ length: Number(options.max ?? "4") + 1 }, () => "false"),
     isVisible: async () => true,
     waitFor: async ({ state }: { state: string }) => {
       expect(state).toBe("visible");
@@ -242,6 +244,7 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   const control = {
     last() { return this; }, waitFor: async () => {}, isVisible: async () => true,
     getAttribute: async (name: string) => name === "aria-expanded" ? "true" : null,
+    innerText: async () => "Pro",
   };
   const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
@@ -254,6 +257,7 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
       return hidden;
     },
     keyboard: { press: async () => {} },
+    url: () => "https://chatgpt.com/",
   };
   return { page, composer, keys, value: () => value };
 }
@@ -278,12 +282,21 @@ test("the four-step browser range keeps Extra High available when Pro is unavail
     .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
 });
 
+test("a visible but locked Pro tick does not grant Pro capability", async () => {
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({
+    locked: [false, false, false, false, true],
+  }).page as never)).resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: false });
+});
+
 test("Pro selection changes the hidden slider through its visible owner, never through model rows", async () => {
   const fixture = reasoningPicker({ delay: 50 });
   const select = (ChatGptBrowserWorker.prototype as unknown as {
     selectModelAndEffort(...args: unknown[]): Promise<unknown>;
   }).selectModelAndEffort;
-  await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
+  await select.call({
+    activeComposer: async () => fixture.composer,
+    assertSelectedEffort: async () => {},
+  }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, extraHighAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
 });
