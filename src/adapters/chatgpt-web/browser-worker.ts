@@ -1108,6 +1108,15 @@ export function remainingStageBudgetMs(
 export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 5_000;
 export const MAX_CHATGPT_BROWSER_PAGE_REBINDS = 2;
 
+function isSupersededBrowserNavigationError(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : typeof (error as { message?: unknown } | null)?.message === "string"
+      ? (error as { message: string }).message
+      : "";
+  return /\b(?:net::)?ERR_ABORTED\b/.test(message);
+}
+
 export class ChatGptBrowserObservationTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
@@ -2597,10 +2606,19 @@ export class ChatGptBrowserWorker {
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
-      });
+      try {
+        await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+      } catch (error) {
+        // Chromium reports ERR_ABORTED when a navigation is superseded by another navigation.
+        // The launcher can legitimately race this goto while handing the owned ChatGPT surface to
+        // Playwright. Continue only for that one error; the authenticated Temporary Chat
+        // postconditions below remain authoritative and fail closed if the replacement navigation
+        // landed anywhere else or never produced a usable document.
+        if (!isSupersededBrowserNavigationError(error)) throw error;
+      }
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
     let composer: Locator;

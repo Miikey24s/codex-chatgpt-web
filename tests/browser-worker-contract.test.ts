@@ -1215,6 +1215,63 @@ test("plain-text editing command fails closed when the focused composer rejects 
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
+test("temporary chat preparation tolerates a superseded navigation after validating the final surface", async () => {
+  let currentUrl = "about:blank";
+  const checkpoints: string[] = [];
+  const passiveLocator = {
+    filter() { return this; },
+    last() { return this; },
+    count: async () => 0,
+    isVisible: async () => false,
+    nth() { return this; },
+  };
+  const composerLocator = {
+    ...passiveLocator,
+    count: async () => 1,
+    nth() { return this; },
+    isVisible: async () => true,
+  };
+  const page = {
+    url: () => currentUrl,
+    goto: async (url: string) => {
+      currentUrl = url;
+      throw new Error(`page.goto: net::ERR_ABORTED at ${url}`);
+    },
+    locator: (selector: string) => selector.includes("prompt-textarea") ? composerLocator : passiveLocator,
+  };
+  const prepareTemporaryChatSurface = (ChatGptBrowserWorker.prototype as unknown as {
+    prepareTemporaryChatSurface(
+      page: unknown,
+      captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    ): Promise<unknown>;
+  }).prepareTemporaryChatSurface;
+  const composer = { ready: true };
+
+  await expect(prepareTemporaryChatSurface.call({
+    activeComposer: async () => composer,
+  }, page, async checkpoint => { checkpoints.push(checkpoint); })).resolves.toBe(composer);
+
+  expect(checkpoints).toEqual([
+    "temporary-chat-navigation-complete",
+    "composer-ready",
+    "session-verified",
+  ]);
+});
+
+test("temporary chat preparation still fails on a real navigation error", async () => {
+  const page = {
+    url: () => "about:blank",
+    goto: async () => { throw new Error("page.goto: net::ERR_FAILED"); },
+  };
+  const prepareTemporaryChatSurface = (ChatGptBrowserWorker.prototype as unknown as {
+    prepareTemporaryChatSurface(page: unknown): Promise<unknown>;
+  }).prepareTemporaryChatSurface;
+
+  await expect(prepareTemporaryChatSurface.call({
+    activeComposer: async () => { throw new Error("must not inspect composer"); },
+  }, page)).rejects.toThrow("ERR_FAILED");
+});
+
 test("compaction prompt attachment retries once only before submission evidence", async () => {
   const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
     attachPromptWithCompactionRetry(
