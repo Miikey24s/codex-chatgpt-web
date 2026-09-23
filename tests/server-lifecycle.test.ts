@@ -209,7 +209,7 @@ test("HTTP turn tracking releases a stream requested by an already disconnected 
 });
 
 test("a real HTTP peer disconnect releases a streaming turn", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig("browser-only"), integrationOwner: "standalone" as const, port: 0 };
   let source!: ReadableStreamDefaultController<Uint8Array>;
   let sourceCancelled = false;
   let markSourceReady!: () => void;
@@ -339,7 +339,7 @@ test("native Codex interrupt remains authoritative when it arrives before HTTP i
 });
 
 test("native passthrough response and compaction requests expose their exact interrupt identity", async () => {
-  const config = defaultConfig("browser-only");
+  const config = { ...defaultConfig("browser-only"), integrationOwner: "standalone" as const };
   const responseIdentity = { threadId: "thread_native_response", turnId: "turn_native_response" };
   let boundResponseIdentity: typeof responseIdentity | undefined;
   const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
@@ -965,7 +965,7 @@ test("a restart recovery turn without a new user instruction fails terminally in
 });
 
 test.each(["alpha/search", "images/generations"])("authenticated lifecycle control aborts active %s before acknowledging cancellation", async path => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig("browser-only"), integrationOwner: "standalone" as const, port: 0 };
   let upstreamAbortObserved = false;
   const server = startServer(config, {
     fetchUpstream: request => new Promise<Response>((_resolve, reject) => {
@@ -1151,7 +1151,7 @@ test("health proves that Codex received a successful augmented model catalog", a
 });
 
 test("server exposes authenticated standalone Web Search on the routed v1 base URL", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig("browser-only"), integrationOwner: "standalone" as const, port: 0 };
   let upstreamRequest: Request | undefined;
   const server = startServer(config, {
     fetchUpstream: async request => {
@@ -1181,7 +1181,7 @@ test("server exposes authenticated standalone Web Search on the routed v1 base U
 });
 
 test("standalone native image generation and edits preserve their upstream protocol", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig("browser-only"), integrationOwner: "standalone" as const, port: 0 };
   const requests: Request[] = [];
   const reply = '{ "created": 1778832973, "data": [{ "b64_json": "native-image-bytes" }] }';
   const denied = '{ "error": { "code": "rate_limit_exceeded", "message": "Image allowance reached" } }';
@@ -1308,7 +1308,7 @@ test("authenticated shutdown requires a verified idle drain", async () => {
 
 test("model catalog health distinguishes no request, transport failure, upstream denial, and recovery without secrets", async () => {
   let outcome: "transport" | "denied" | "invalid" | "ready" = "transport";
-  const server = startServer({ ...defaultConfig("browser-only"), port: 0 }, {
+  const server = startServer({ ...defaultConfig("browser-only"), integrationOwner: "standalone", port: 0 }, {
     fetchUpstream: async () => {
       if (outcome === "transport") throw Object.assign(new Error("private proxy credentials and host"), { code: "UnsupportedProxyProtocol" });
       if (outcome === "denied") return new Response("private upstream account detail", { status: 403 });
