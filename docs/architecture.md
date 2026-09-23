@@ -89,7 +89,7 @@ agent for a one-shot structured checkpoint, waits for the response and physical 
 then closes the old surface. The next epoch gets a new Temporary Chat. Model messages never copy
 state between tabs. Tabs share only the local login
 partition and keep independent documents and lifecycles. Closing a running tab destroys its page
-and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
+and terminates that browser turn. An eleventh concurrent turn fails explicitly; the cap avoids excessive
 parallel traffic that could trigger account abuse controls.
 
 Browser submission and response binding use ChatGPT's logical `data-turn-id`, not the
@@ -231,7 +231,7 @@ launcher error.
 - Store browser state and tunnel credentials under the application home with mode `0600`.
 - Protect lifecycle control endpoints with a random application-owned bearer token.
 - Never place secret values in command-line arguments, logs, generated profiles, or Git.
-- Limit browser turns to five independent task-bound tabs and reject unsupported models explicitly.
+- Limit browser turns to ten independent task-bound tabs per instance and reject unsupported models explicitly.
   The selected routed model fixes the adapter effort; a conflicting request effort cannot change it.
 - Do not retry or switch modes to evade product usage limits.
 

@@ -2423,15 +2423,15 @@ test("a required retained conversation fails before creating a browser tab", asy
   assert.equal(created, false);
 });
 
-test("five browser tabs are a hard account-safety limit", async () => {
-  const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => [
+test("ten browser tabs are a hard per-instance concurrency limit", async () => {
+  const turnTabs = new Map(Array.from({ length: 10 }, (_unused, index) => [
     `tab-${index + 1}`,
     { ordinal: index + 1 },
   ]));
 
   await assert.rejects(
-    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_six", 444),
-    /already has 5 browser tabs.*avoid excessive parallel traffic/,
+    BrowserHost.prototype.createTurnTab.call({ turnTabs }, "trace_eleven", 444),
+    /already has 10 browser tabs.*avoid excessive parallel traffic/,
   );
 });
 
