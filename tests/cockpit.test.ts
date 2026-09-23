@@ -5,10 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   syncCockpitIntegration,
+  syncCockpitModelCatalog,
   syncCockpitPoolRoutingRules,
   syncCockpitProvidersPool,
   syncCockpitRoutingRules,
 } from "../src/cockpit";
+
+const PLUS_WEB_MODELS = ["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol"];
 
 function accountId(apiKey: string): string {
   return `codex_apikey_${createHash("md5").update(apiKey).digest("hex")}`;
@@ -59,12 +62,13 @@ describe("Cockpit model routing", () => {
       });
       expect(providers[1].name).toBe("Codex Web GPT");
       expect(providers[1].baseUrl).toBe("http://127.0.0.1:17841/v1");
+      expect(providers[1].modelCatalog).toEqual(PLUS_WEB_MODELS);
       expect(providers[1].apiKeys).toEqual([{ id: "primary-key", name: "Primary", apiKey: "primary-secret" }]);
       expect(providers[2]).toMatchObject({
         id: "cmp_webgpt_instance_2",
         name: "Codex Web GPT · Work 2",
         baseUrl: "http://127.0.0.1:17842/v1",
-        modelCatalog: ["chatgpt-web/high"],
+        modelCatalog: PLUS_WEB_MODELS,
         wireApi: "responses",
       });
       expect(providers[2].apiKeys).toEqual([{
@@ -76,6 +80,62 @@ describe("Cockpit model routing", () => {
       expect(providers.some((provider: { baseUrl?: string }) => provider.baseUrl?.includes("17999"))).toBe(false);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("provider catalogs follow each managed instance capability without advertising locked models", () => {
+    const home = mkdtempSync(join(tmpdir(), "codex-web-cockpit-capabilities-"));
+    try {
+      writeFileSync(join(home, "codex_model_providers.json"), "[]\n");
+      expect(syncCockpitProvidersPool([
+        { id: "primary", name: "Primary", port: 17841, solAvailable: false },
+        { id: "instance-2", name: "Plus", port: 17842, solAvailable: true, extraHighAvailable: true, proAvailable: false },
+        { id: "instance-3", name: "Pro-capable", port: 17843, solAvailable: true, extraHighAvailable: true, proAvailable: true },
+      ], home)).toBe(true);
+
+      const providers = JSON.parse(readFileSync(join(home, "codex_model_providers.json"), "utf8"));
+      expect(providers.map((provider: { modelCatalog: string[] }) => provider.modelCatalog)).toEqual([
+        ["chatgpt-web/gpt-5.6-luna"],
+        PLUS_WEB_MODELS,
+        [...PLUS_WEB_MODELS, "chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-pro"],
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("experimental Cockpit catalog publishes the v6 union and replaces a legacy Web default", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-web-cockpit-catalog-"));
+    const previousCodexHome = process.env.CODEX_HOME;
+    try {
+      process.env.CODEX_HOME = root;
+      const catalogPath = join(root, ".cockpit-experimental-model-catalog-config.json");
+      writeFileSync(catalogPath, `${JSON.stringify({
+        version: 1,
+        default_model_id: "chatgpt-web/high",
+        models: [
+          { model_id: "native-custom", display_name: "Native custom", reasoning_efforts: ["high"] },
+          { model_id: "chatgpt-web/light", display_name: "Legacy Instant", reasoning_efforts: ["low"] },
+          { model_id: "chatgpt-web/high", display_name: "Legacy High", reasoning_efforts: ["high"] },
+        ],
+      }, null, 2)}\n`);
+
+      expect(syncCockpitModelCatalog([
+        { id: "primary", name: "Primary", port: 17841, solAvailable: true, proAvailable: false },
+        { id: "instance-2", name: "Work", port: 17842, solAvailable: true, extraHighAvailable: true, proAvailable: false },
+      ])).toBe(true);
+
+      const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+      expect(catalog.default_model_id).toBe("chatgpt-web/gpt-5.6-sol");
+      expect(catalog.models).toEqual([
+        { model_id: "native-custom", display_name: "Native custom", reasoning_efforts: ["high"] },
+        { model_id: "chatgpt-web/gpt-5.6-sol-instant", display_name: "GPT-5.6 Sol Instant (Web)", reasoning_efforts: ["low"] },
+        { model_id: "chatgpt-web/gpt-5.6-sol", display_name: "GPT-5.6 Sol (Web)", reasoning_efforts: ["medium", "high", "xhigh"] },
+      ]);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

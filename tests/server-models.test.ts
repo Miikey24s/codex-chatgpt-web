@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
   availableChatGptWebModelRoutes,
+  chatGptWebRouteEfforts,
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-  CHATGPT_WEB_MODEL_ROUTES,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { buildCockpitProviderModelCatalog } from "../src/model-catalog";
@@ -55,20 +55,14 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
       multi_agent_version?: string;
     }>;
   };
-  expect(body.models.map(model => model.slug)).toEqual([
-    "gpt-5.6-sol",
-    "chatgpt-web/light",
-    "chatgpt-web/medium",
-    "chatgpt-web/high",
-    "chatgpt-web/extra-high",
-    "chatgpt-web/pro",
-  ]);
+  const routes = availableChatGptWebModelRoutes(config, true);
+  expect(body.models.map(model => model.slug)).toEqual(["gpt-5.6-sol", ...routes.map(route => route.slug)]);
   expect(body.models[0]!.context_window).toBe(300_000);
   expect(body.models[0]!.max_context_window).toBe(371_851);
   expect(body.models[0]!.auto_compact_token_limit).toBe(270_000);
   expect(body.models[0]!.multi_agent_version).toBe("v2");
   for (const [index, model] of body.models.slice(1).entries()) {
-    const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
+    const route = routes[index]!;
     const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
     expect(model.context_window).toBe(limits.contextWindow);
     expect(model.max_context_window).toBe(limits.contextWindow);
@@ -102,7 +96,7 @@ test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
   );
   const body = await response.json() as { models: Array<{ slug: string }> };
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")).map(model => model.slug))
-    .toEqual(["chatgpt-web/luna", "chatgpt-web/think"]);
+    .toEqual(availableChatGptWebModelRoutes(config, true).map(route => route.slug));
 });
 
 test("Zero Risk returns one generic Web row without using scanned capabilities", async () => {
@@ -177,7 +171,7 @@ test("ChatGPT-only native catalog rows do not turn model discovery into a 502", 
   const body = await response.json() as { models: Array<{ slug: string; supported_in_api?: boolean }> };
   expect(body.models[0]).toMatchObject({ slug: "gpt-chatgpt-only", supported_in_api: false });
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")))
-    .toHaveLength(3);
+    .toHaveLength(availableChatGptWebModelRoutes(config, true).length);
   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/"))
     .every(model => model.supported_in_api === true)).toBe(true);
 });
@@ -230,7 +224,7 @@ test("serves Cockpit-owned /models catalog with exact context limits for standar
           expect(model!.supports_tools).toBe(true);
           expect(model!.supports_reasoning).toBe(true);
           expect(model!.supports_compact).toBe(true);
-          expect(model!.reasoning_efforts).toEqual([route.codexEffort]);
+          expect(model!.reasoning_efforts).toEqual([...chatGptWebRouteEfforts(route, config)]);
           expect(model!.default_reasoning_effort).toBe(route.codexEffort);
         }
 

@@ -1393,12 +1393,21 @@ async function start() {
   const syncCockpitPool = async () => {
     if (IS_DEV_PROFILE) return { ok: false, skipped: true, message: "DEV launcher has no Cockpit account pool" };
     return primaryManagedInstance.runtimeHost.syncCockpitPool(
-      instanceRegistryStore.read().instances.map(instance => ({
-        id: instance.id,
-        name: instance.name,
-        port: instance.port,
-        enabled: instance.enabled,
-      })),
+      instanceRegistryStore.read().instances.map(instance => {
+        const config = managedInstances.get(instance.id)?.runtimeHost?.runtimeConfigSnapshot().config;
+        return {
+          id: instance.id,
+          name: instance.name,
+          port: instance.port,
+          enabled: instance.enabled,
+          ...(typeof config?.solAvailable === "boolean" ? { solAvailable: config.solAvailable } : {}),
+          ...(typeof config?.extraHighAvailable === "boolean" ? { extraHighAvailable: config.extraHighAvailable } : {}),
+          ...(typeof config?.proAvailable === "boolean" ? { proAvailable: config.proAvailable } : {}),
+          ...(config?.browserInteractionMode === "automatic" || config?.browserInteractionMode === "manual"
+            ? { browserInteractionMode: config.browserInteractionMode } : {}),
+          ...(typeof config?.zeroRiskProEnabled === "boolean" ? { zeroRiskProEnabled: config.zeroRiskProEnabled } : {}),
+        };
+      }),
     );
   };
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;

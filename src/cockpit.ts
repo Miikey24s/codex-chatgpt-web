@@ -2,6 +2,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  availableChatGptWebModelRoutes,
+  chatGptWebRouteEfforts,
+  type ChatGptWebAccountCapabilities,
+} from "./chatgpt-web-models";
 import { getCodexHome } from "./codex-integration-shared";
 
 export interface CockpitAuthInfo {
@@ -101,7 +106,48 @@ export function readCockpitAuth(): CockpitAuthInfo {
   }
 }
 
-export function syncCockpitModelCatalog(): boolean {
+function defaultCockpitWebInstance(): CockpitWebInstance {
+  return { id: "primary", name: "Primary", port: 17841 };
+}
+
+function cockpitInstanceCapabilities(instance: CockpitWebInstance): ChatGptWebAccountCapabilities {
+  return {
+    solAvailable: instance.solAvailable !== false,
+    extraHighAvailable: instance.extraHighAvailable === true,
+    proAvailable: instance.proAvailable === true,
+    browserInteractionMode: instance.browserInteractionMode ?? "automatic",
+    zeroRiskProEnabled: instance.zeroRiskProEnabled === true,
+  };
+}
+
+function cockpitWebModelIds(instance: CockpitWebInstance): string[] {
+  return availableChatGptWebModelRoutes(cockpitInstanceCapabilities(instance)).map(route => route.slug);
+}
+
+function cockpitWebCatalogTargets(instances: CockpitWebInstance[]): Array<{
+  model_id: string;
+  display_name: string;
+  reasoning_efforts: string[];
+}> {
+  const targets = new Map<string, { model_id: string; display_name: string; reasoning_efforts: string[] }>();
+  for (const instance of instances) {
+    const capabilities = cockpitInstanceCapabilities(instance);
+    for (const route of availableChatGptWebModelRoutes(capabilities)) {
+      const target = targets.get(route.slug) ?? {
+        model_id: route.slug,
+        display_name: route.displayName,
+        reasoning_efforts: [],
+      };
+      for (const effort of chatGptWebRouteEfforts(route, capabilities)) {
+        if (!target.reasoning_efforts.includes(effort)) target.reasoning_efforts.push(effort);
+      }
+      targets.set(route.slug, target);
+    }
+  }
+  return [...targets.values()];
+}
+
+export function syncCockpitModelCatalog(rawInstances: CockpitWebInstance[] = [defaultCockpitWebInstance()]): boolean {
   const catalogConfigFile = join(getCodexHome(), ".cockpit-experimental-model-catalog-config.json");
   const activeCatalogFile = join(getCodexHome(), "cockpit-model-catalog.json");
   const activeCatalogHasWebModel = (): boolean => {
@@ -110,11 +156,8 @@ export function syncCockpitModelCatalog(): boolean {
       const content = JSON.parse(readFileSync(activeCatalogFile, "utf8")) as {
         models?: Array<{ slug?: string; id?: string; model_id?: string }>;
       };
-      return (content.models ?? []).some(model => (
-        model.slug === COCKPIT_WEB_MODEL
-        || model.id === COCKPIT_WEB_MODEL
-        || model.model_id === COCKPIT_WEB_MODEL
-      ));
+      return (content.models ?? []).some(model => [model.slug, model.id, model.model_id]
+        .some(id => id?.startsWith("chatgpt-web/")));
     } catch {
       return false;
     }
@@ -125,6 +168,10 @@ export function syncCockpitModelCatalog(): boolean {
   if (!existsSync(catalogConfigFile)) return activeCatalogHasWebModel();
 
   try {
+    const instances = validateCockpitWebInstances(rawInstances);
+    if (instances.length === 0) return false;
+    const targets = cockpitWebCatalogTargets(instances);
+    const targetIds = new Set(targets.map(target => target.model_id));
     const content = JSON.parse(readFileSync(catalogConfigFile, "utf8")) as {
       version?: number;
       models?: Array<{
@@ -136,21 +183,20 @@ export function syncCockpitModelCatalog(): boolean {
     };
 
     content.models ??= [];
-    // Only keep chatgpt-web/high as requested by user
-    const target = {
-      model_id: "chatgpt-web/high",
-      display_name: "Codex Web GPT",
-      reasoning_efforts: ["high"],
-    };
-
-    // Remove legacy light/medium if user prefers single high model
-    content.models = content.models.filter(m => m.model_id !== "chatgpt-web/light" && m.model_id !== "chatgpt-web/medium");
-
-    const existing = content.models.find(m => m.model_id === target.model_id);
-    if (!existing) {
-      content.models.push(target);
-    } else {
-      existing.display_name = target.display_name;
+    content.models = content.models.filter(model => (
+      !model.model_id.startsWith("chatgpt-web/") || targetIds.has(model.model_id)
+    ));
+    for (const target of targets) {
+      const existing = content.models.find(model => model.model_id === target.model_id);
+      if (!existing) content.models.push(target);
+      else {
+        existing.display_name = target.display_name;
+        existing.reasoning_efforts = target.reasoning_efforts;
+      }
+    }
+    if (content.default_model_id?.startsWith("chatgpt-web/") && !targetIds.has(content.default_model_id)) {
+      content.default_model_id = targets.find(target => target.reasoning_efforts.includes("high"))?.model_id
+        ?? targets[0]?.model_id;
     }
 
     const next = `${JSON.stringify(content, null, 2)}\n`;
@@ -168,6 +214,11 @@ export interface CockpitWebInstance {
   name: string;
   port: number;
   enabled?: boolean;
+  solAvailable?: boolean;
+  extraHighAvailable?: boolean;
+  proAvailable?: boolean;
+  browserInteractionMode?: "automatic" | "manual";
+  zeroRiskProEnabled?: boolean;
 }
 
 interface CockpitProviderApiKey {
@@ -202,6 +253,18 @@ function validateCockpitWebInstances(instances: CockpitWebInstance[]): CockpitWe
     }
     if (!Number.isSafeInteger(instance.port) || instance.port < 1 || instance.port > 65_535) {
       throw new Error(`Invalid Web GPT instance port: ${instance.id}`);
+    }
+    for (const key of ["solAvailable", "extraHighAvailable", "proAvailable", "zeroRiskProEnabled"] as const) {
+      if (instance[key] !== undefined && typeof instance[key] !== "boolean") {
+        throw new Error(`Invalid Web GPT instance ${key}: ${instance.id}`);
+      }
+    }
+    if (instance.browserInteractionMode !== undefined
+      && instance.browserInteractionMode !== "automatic" && instance.browserInteractionMode !== "manual") {
+      throw new Error(`Invalid Web GPT instance browserInteractionMode: ${instance.id}`);
+    }
+    if ((instance.extraHighAvailable === true || instance.proAvailable === true) && instance.solAvailable === false) {
+      throw new Error(`Invalid Web GPT instance capabilities: ${instance.id}`);
     }
     if (ids.has(instance.id)) throw new Error(`Duplicate Web GPT instance id: ${instance.id}`);
     if (ports.has(instance.port)) throw new Error(`Duplicate Web GPT instance port: ${instance.port}`);
@@ -279,7 +342,7 @@ export function syncCockpitProvidersPool(
         id: managedProviderId(instance.id),
         name: managedProviderName(instance),
         baseUrl: managedProviderUrl(instance),
-        modelCatalog: ["chatgpt-web/high"],
+        modelCatalog: cockpitWebModelIds(instance),
         supportsVision: false,
         wireApi: "responses",
         supportsWebsockets: false,
@@ -294,7 +357,7 @@ export function syncCockpitProvidersPool(
         id: managedProviderId(instance.id),
         name: managedProviderName(instance),
         baseUrl: managedProviderUrl(instance),
-        modelCatalog: [COCKPIT_WEB_MODEL],
+        modelCatalog: cockpitWebModelIds(instance),
         supportsVision: false,
         wireApi: "responses",
         supportsWebsockets: false,
@@ -332,16 +395,19 @@ interface CockpitModelProvider {
   apiKeys?: Array<{ apiKey?: string }>;
 }
 
-const COCKPIT_WEB_MODEL = "chatgpt-web/high";
 const OAUTH_EXCLUSIONS = ["chatgpt-web/*"];
 const COCKPIT_WEB_EXCLUSIONS = ["gpt-*", "codex-*"];
 const LEGACY_AURORA_EXCLUSIONS = ["gpt-5-6-thinking", "gpt-5.*", "gpt-image-*"];
 const MANAGED_EXCLUSIONS = new Set([
-  COCKPIT_WEB_MODEL,
   ...OAUTH_EXCLUSIONS,
   ...COCKPIT_WEB_EXCLUSIONS,
   ...LEGACY_AURORA_EXCLUSIONS,
 ].map(model => model.toLowerCase()));
+
+function isManagedModelExclusion(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.startsWith("chatgpt-web/") || MANAGED_EXCLUSIONS.has(normalized);
+}
 
 function cockpitApiKeyAccountId(apiKey: string): string {
   return `codex_apikey_${createHash("md5").update(apiKey).digest("hex")}`;
@@ -359,7 +425,7 @@ function providerAccountIds(provider: CockpitModelProvider | undefined): Set<str
 /**
  * Keep each model family on its intended credential type:
  * - native Codex models -> OAuth accounts
- * - chatgpt-web/high -> local Codex Web GPT provider
+ * - chatgpt-web/* -> local Codex Web GPT provider
  *
  * Cockpit pools every enabled credential by default. Per-account model
  * exclusions are therefore the deterministic routing boundary.
@@ -399,7 +465,7 @@ export function syncCockpitPoolRoutingRules(
     for (const accountId of accountIds) {
       const previous = previousByAccount.get(accountId);
       const exclusions = (previous?.excludedModels ?? [])
-        .filter(model => !MANAGED_EXCLUSIONS.has(model.trim().toLowerCase()));
+        .filter(model => !isManagedModelExclusion(model));
       if (activeWebAccountIds.has(accountId)) {
         exclusions.push(...COCKPIT_WEB_EXCLUSIONS);
       } else {
@@ -471,7 +537,7 @@ export function syncCockpitIntegration(bridgePort = 17841, cockpitHome = getCock
 export function syncCockpitInstancePool(instances: CockpitWebInstance[], cockpitHome = getCockpitHome()): CockpitSyncResult {
   const providerConfigured = syncCockpitProvidersPool(instances, cockpitHome);
   const routingIsolated = syncCockpitPoolRoutingRules(instances, cockpitHome);
-  const catalogSynced = syncCockpitModelCatalog();
+  const catalogSynced = syncCockpitModelCatalog(instances);
   const ok = providerConfigured && routingIsolated && catalogSynced;
   return {
     ok,
