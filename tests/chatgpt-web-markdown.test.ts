@@ -24,15 +24,32 @@ test("turns observed inline file path formats into Markdown links", () => {
       target: "C:/Users/Dev/Documents/Codex/path-format-probe/zeta-result.pdf",
     },
     {
+      path: String.raw`C:\Codex_Project_Unity\_Editor\file.cs`,
+      target: "C:/Codex_Project_Unity/_Editor/file.cs",
+    },
+    {
+      path: "src/_private_/file_name.ts",
+      target: "src/_private_/file_name.ts",
+    },
+    {
       path: "src/adapters/chatgpt-web/markdown.ts:47:3",
       target: "src/adapters/chatgpt-web/markdown.ts:47:3",
     },
   ];
 
   for (const { path, target } of cases) {
-    expect(chatGptHtmlToMarkdown(`<p>Created <code>${path}</code>.</p>`))
-      .toBe(`Created [${path}](<${target}>).`);
+    const markdown = chatGptHtmlToMarkdown(`<p>Created <code>${path}</code>.</p>`);
+    expect(markdown).toContain(`](<${target}>)`);
+    expect(Bun.markdown.html(markdown))
+      .toBe(`<p>Created <a href="${target}">${path}</a>.</p>\n`);
   }
+});
+
+test("preserves standalone Codex plan markers without rewriting literal code", () => {
+  expect(chatGptHtmlToMarkdown("<p>&lt;proposed_plan&gt;</p><p>&lt;/proposed_plan&gt;</p>"))
+    .toBe("<proposed_plan>\n\n</proposed_plan>");
+  expect(chatGptHtmlToMarkdown("<pre><code>&lt;proposed\\_plan&gt;</code></pre>"))
+    .toContain("<proposed\\_plan>");
 });
 
 test("preserves inline code that is not an unambiguous file path", () => {

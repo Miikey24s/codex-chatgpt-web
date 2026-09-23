@@ -4095,6 +4095,24 @@ test("the shipped commentary classifier separates answer Markdown from reasoning
   expect(answerFor('<div class="markdown">ONLY ANSWER</div>')).toBe("ONLY ANSWER");
 });
 
+test("a painted link label waits for its destination before streaming", () => {
+  const { createDocument, createWindow } = require("@mixmark-io/domino") as {
+    createDocument(html: string): { body: HTMLElement };
+    createWindow(): { HTMLElement: unknown };
+  };
+  const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const source = worker.split("const linkState = ")[1]?.split("const appendBlockSegment = ")[0];
+  if (!source) throw new Error("link state observation is missing from browser-worker.ts");
+  const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(`const linkState = ${source}`);
+  const window = createWindow();
+  const linkState = new Function("HTMLElement", `${javascript}; return linkState;`)(window.HTMLElement) as
+    (element: HTMLElement) => { pendingLinks: boolean; linkTargets: string[] };
+  const pending = createDocument('<p><a>Source</a></p>').body.firstElementChild as HTMLElement;
+  expect(linkState(pending)).toEqual({ pendingLinks: true, linkTargets: [] });
+  const ready = createDocument('<p><a href="https://example.com/report">Source</a></p>').body.firstElementChild as HTMLElement;
+  expect(linkState(ready)).toEqual({ pendingLinks: false, linkTargets: ["https://example.com/report"] });
+});
+
 test("embedded chart hydration cannot replace Markdown answer content with renderer UI", () => {
   const { createDocument, createWindow } = require("@mixmark-io/domino") as {
     createDocument(html: string): { body: HTMLElement };
@@ -4144,6 +4162,17 @@ test("embedded chart hydration cannot replace Markdown answer content with rende
     .not.toBe(text("<pre><code>one\ntwo</code></pre>"));
   expect(text("<div>A</div><div>B</div>"))
     .toBe(text("<section><div>A</div><div>B</div></section>"));
+  const files = createDocument('<p>Report: <span data-state="closed">'
+    + '<button class="behavior-btn entity-underline" href="https://wrong.example/download" aria-label="Download">'
+    + '<svg><text>File icon</text></svg>report.pdf<span hidden>Hidden</span></button></span> '
+    + '<button class="entity-underline behavior-btn">report.pdf</button>'
+    + '<button>Copy</button><button class="entity-underline">Retry</button>'
+    + '<button class="behavior-btn entity-underline" hidden>hidden.pdf</button>'
+    + '<span aria-hidden="true"><button class="behavior-btn entity-underline">also-hidden.pdf</button></span></p>').body;
+  const projectedFiles = contentFor(files);
+  expect(chatGptHtmlToMarkdown(projectedFiles.innerHTML)).toBe("Report: report.pdf report.pdf");
+  expect(projectedFiles.querySelector("button")).toBeFalsy();
+  expect(projectedFiles.innerHTML).not.toContain("wrong.example");
 });
 
 test("proven MCP progress vetoes completion, not only the health verdicts", () => {

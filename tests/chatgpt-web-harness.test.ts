@@ -1829,6 +1829,19 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(rewritten.observe(different, 700)).toBe("");
   });
 
+  test("rejects a link destination rewrite after the label was streamed", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+    const source = {
+      key: "source", tag: "p", text: "Source", linkTargets: ["https://example.com/first"],
+      html: '<p><a href="https://example.com/first">Source</a></p>', streamable: true,
+    };
+    expect(buffer.observe([source], 0)).toBe("[Source](https://example.com/first)");
+    expect(buffer.observe([{ ...source, linkTargets: ["https://example.com/second"],
+      html: '<p><a href="https://example.com/second">Source</a></p>' }], 1)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBe(false);
+    expect(() => buffer.finish()).toThrow("changed a completed text block");
+  });
+
   test("recovers from a transient React frame that omits already-streamed Markdown blocks", () => {
     const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
     const first = { key: "first", html: "<p>First</p>", text: "First", streamable: true };

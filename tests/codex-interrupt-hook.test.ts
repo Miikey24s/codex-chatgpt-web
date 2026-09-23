@@ -187,3 +187,31 @@ test("keeps foreign TOML tables inserted between the managed hook and its trust 
     }
   }
 });
+
+test("accepts a literal-quoted Windows trust key while preserving a foreign trust entry", () => {
+  const original = 'model = "example"\n';
+  const installed = installCodexInterruptHook(original, "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const stateKey = String.raw`D:\AppData\Codex\UserData\config.toml:interrupt:0:0`;
+  const beforeHeader = `[hooks.state.${JSON.stringify(installed.installed.stateKey)}]`;
+  const journal = {
+    ...installed.installed,
+    stateKey,
+    fragment: installed.installed.fragment.replace(beforeHeader, `[hooks.state.${JSON.stringify(stateKey)}]`),
+  };
+  const foreign = `[hooks.state.'C:\\Users\\test\\.codex\\config.toml:interrupt:0:0']\ntrusted_hash = ${JSON.stringify(journal.trustedHash)}\n`;
+  for (const ending of ["\n", "\r\n"]) {
+    const edited = installed.text.replace(beforeHeader, `[hooks.state.'${stateKey}']`)
+      .replace(MANAGED_INTERRUPT_HOOK_END, foreign + MANAGED_INTERRUPT_HOOK_END)
+      .replaceAll("\n", ending);
+    verifyCodexInterruptHook(edited, journal);
+    expect(restoreCodexInterruptHook(edited, journal)).toBe((original + foreign).replaceAll("\n", ending));
+    for (const changed of [
+      edited.replace("timeout = 3", "timeout = 2"),
+      edited.replace(JSON.stringify(journal.command), JSON.stringify("other-command")),
+      edited.replace(`[hooks.state.'${stateKey}']`, "[hooks.state.'different-key']"),
+    ]) {
+      expect(changed).not.toBe(edited);
+      expect(() => verifyCodexInterruptHook(changed, journal)).toThrow("changed after setup");
+    }
+  }
+});

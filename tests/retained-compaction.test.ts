@@ -217,7 +217,7 @@ test("active compaction delivers the current result and converts every later MCP
       bindingId: claimed.bindingId,
       wireName: "exec_command",
       arguments: { cmd: "pwd" },
-    });
+    }, null);
     const [request] = await broker.nextToolBatch(token);
     broker.requestCompaction(token, {
       content: [{ type: "text", text: "compact now" }],
@@ -234,7 +234,7 @@ test("active compaction delivers the current result and converts every later MCP
       bindingId: claimed.bindingId,
       wireName: "exec_command",
       arguments: { cmd: "git status --short" },
-    })).resolves.toMatchObject({
+    }, null)).resolves.toMatchObject({
       content: [{ type: "text", text: "compact now" }],
       isError: true,
     });
@@ -268,7 +268,7 @@ test("active compaction drains an MCP call already queued without an outer Codex
       bindingId: claimed.bindingId,
       wireName: "exec_command",
       arguments: { cmd: "must-not-run" },
-    });
+    }, null);
     await Bun.sleep(25);
     const interrupted = broker.requestCompaction(token, {
       content: [{ type: "text", text: "compact instead" }],
@@ -813,7 +813,7 @@ test("active compaction interrupts a queued MCP call that Codex never started wa
       bindingId: claimed.bindingId,
       wireName: "exec_command",
       arguments: { cmd: "must-not-run" },
-    });
+    }, null);
     const browser = queuedInvocation.then(result => {
       expect(result.isError).toBeTrue();
       expect(JSON.stringify(result.content)).toContain(CODEX_ACTIVE_COMPACTION_REQUEST_MARKER);

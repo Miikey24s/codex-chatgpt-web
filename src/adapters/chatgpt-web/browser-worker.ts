@@ -4104,12 +4104,23 @@ export class ChatGptBrowserWorker {
         // These are embedded renderers, not Markdown answer text. Their loading labels, controls
         // and plot axes change independently of generation (including after a later paragraph).
         // Keep their UI out of both the emitted HTML and the text consistency fingerprint.
-        // Also remove the controls/media already excluded by chatGptHtmlToMarkdown, so their
+        // Also remove the media already excluded by chatGptHtmlToMarkdown, so their
         // accessibility labels cannot become consistency fingerprints for untransmitted text.
         // Ordinary code blocks, surrounding prose and the original observed DOM remain intact.
         for (const widget of Array.from(content.querySelectorAll(
-          ".chart-widget-container, [data-code-block-preview-pane], button, script, style, svg, img, picture, source",
+          ".chart-widget-container, [data-code-block-preview-pane], script, style, svg, img, picture, source",
         ))) widget.remove();
+        for (const button of Array.from(content.querySelectorAll("button"))) {
+          if (button.matches(".behavior-btn.entity-underline")
+            && !button.closest('[hidden], [aria-hidden="true"]')) {
+            for (const hidden of Array.from(button.querySelectorAll('[hidden], [aria-hidden="true"], .sr-only, [role="tooltip"]'))) {
+              hidden.remove();
+            }
+            button.replaceWith(content.ownerDocument.createTextNode(button.textContent ?? ""));
+          } else {
+            button.remove();
+          }
+        }
         return content;
       };
       // ChatGPT may merge adjacent `.markdown` roots or virtualize an earlier prefix while a streamed
@@ -4119,6 +4130,8 @@ export class ChatGptBrowserWorker {
         tag: string;
         html: string;
         text: string;
+        pendingLinks: boolean;
+        linkTargets: string[];
         group?: string;
         sourceStart?: number;
         sourceEnd?: number;
@@ -4161,6 +4174,18 @@ export class ChatGptBrowserWorker {
           ? { sourceStart, sourceEnd }
           : undefined;
       };
+      const linkState = (element: HTMLElement): { pendingLinks: boolean; linkTargets: string[] } => {
+        // A link label can appear before its destination; streaming it then loses the href.
+        const anchors = [element, ...Array.from(element.querySelectorAll<HTMLElement>("a"))]
+          .filter(candidate => candidate.tagName === "A" && Boolean(candidate.textContent?.trim()));
+        return {
+          pendingLinks: anchors.some(candidate => !candidate.getAttribute("href")?.trim()),
+          linkTargets: anchors.flatMap(candidate => {
+            const href = candidate.getAttribute("href");
+            return href?.trim() ? [href] : [];
+          }),
+        };
+      };
       const appendBlockSegment = (child: HTMLElement) => {
         const tag = child.tagName.toLowerCase();
         const childRange = sourceRange(child);
@@ -4172,6 +4197,7 @@ export class ChatGptBrowserWorker {
             tag,
             html: child.outerHTML,
             text: markdownText(child),
+            ...linkState(child),
             ...childRange,
           });
           return;
@@ -4192,6 +4218,7 @@ export class ChatGptBrowserWorker {
             tag: `${tag}:item`,
             html: shell.outerHTML,
             text: markdownText(item),
+            ...linkState(item),
             group,
             ...sourceRange(item),
           });
@@ -4205,6 +4232,7 @@ export class ChatGptBrowserWorker {
             tag: "root",
             html: markdownRoot.innerHTML,
             text: markdownText(markdownRoot),
+            ...linkState(markdownRoot),
             ...sourceRange(markdownRoot),
           });
           return;
@@ -4229,6 +4257,7 @@ export class ChatGptBrowserWorker {
               tag: "inline",
               html: shell.outerHTML,
               text,
+              ...linkState(shell),
               ...(ranges.length > 0 ? {
                 sourceStart: Math.min(...ranges.map(range => range.sourceStart)),
                 sourceEnd: Math.max(...ranges.map(range => range.sourceEnd)),
@@ -4257,7 +4286,8 @@ export class ChatGptBrowserWorker {
         ...(segment.group ? { group: segment.group } : {}),
         ...(segment.sourceStart !== undefined ? { sourceStart: segment.sourceStart } : {}),
         ...(segment.sourceEnd !== undefined ? { sourceEnd: segment.sourceEnd } : {}),
-        streamable: index < segments.length - 1,
+        streamable: index < segments.length - 1 && !segment.pendingLinks,
+        linkTargets: segment.linkTargets,
       }));
       const rendered = renderedRoots.at(-1);
       const completionAction = rendered
